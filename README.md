@@ -117,3 +117,46 @@ Este proyecto esta pensado como primer paso antes de:
 - Reemplazo de `sync_generator` por una entrada real acondicionada de cruce por cero.
 
 Para hardware industrial real se debe agregar aislamiento, deteccion segura de red, protecciones, temporizacion validada y revision electrica completa.
+
+## Prueba segura en ZedBoard
+
+El repo incluye un wrapper para hardware real:
+
+```text
+rtl/hardware_top.v
+constraints/zedboard.xdc
+scripts/build_vivado.tcl
+```
+
+La prueba usa solo botones y LEDs de la ZedBoard:
+
+- `BTNU`: incrementa el angulo.
+- `BTND`: decrementa el angulo.
+- `BTNC`: reset al angulo medio.
+- `LD0`: sincronia simulada.
+- `LD1`: pulso de gate estirado para verlo en LED.
+- `LD2`: pulso de cruce por cero.
+- `LD3..LD7`: bits altos de `angle_setpoint`.
+
+Desde PowerShell, con Vivado instalado:
+
+```powershell
+& "C:\AMDDesignTools\2025.2\Vivado\bin\vivado.bat" -mode batch -source scripts\build_vivado.tcl
+```
+
+El bitstream queda en:
+
+```text
+build_vivado/zboard_soft_starter.runs/impl_1/hardware_top.bit
+```
+
+Para cargarlo en la tarjeta:
+
+1. Conecta la ZedBoard por USB/JTAG.
+2. Abre Vivado.
+3. Ve a `Open Hardware Manager`.
+4. Usa `Open Target` -> `Auto Connect`.
+5. Usa `Program Device`.
+6. Selecciona `hardware_top.bit`.
+
+Esta prueba no conecta salidas a potencia. Es solo una validacion segura de temporizacion, botones y LEDs.

@@ -2,12 +2,13 @@ IMAGE_NAME ?= zboard-softstarter-dev
 CONTAINER_WORKDIR ?= /project
 
 RTL_SRCS := rtl/sync_generator.v rtl/phase_counter.v rtl/control_angle.v rtl/top.v
+HW_SRCS := $(RTL_SRCS) rtl/hardware_top.v
 TB_SRCS := tb/tb_top.v
 BUILD_DIR := build
 SIM_OUT := $(BUILD_DIR)/soft_starter_tb.out
 VCD := $(BUILD_DIR)/waves.vcd
 
-.PHONY: all sim wave lint clean docker-build docker-sim docker-shell
+.PHONY: all sim wave lint lint-hw clean docker-build docker-sim docker-shell
 
 all: sim
 
@@ -25,6 +26,9 @@ wave: sim
 
 lint:
 	verilator --lint-only -Irtl --top-module top $(RTL_SRCS)
+
+lint-hw:
+	verilator --lint-only -Irtl --top-module hardware_top $(HW_SRCS)
 
 clean:
 	rm -rf $(BUILD_DIR)

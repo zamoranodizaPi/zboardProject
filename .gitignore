@@ -1,4 +1,16 @@
 build/
+build_vivado/
+.Xil/
+*.jou
+*.log
+*.str
+dfx_runtime.txt
+*.xpr
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
 *.vcd
 *.fst
 *.lxt

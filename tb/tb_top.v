@@ -23,6 +23,7 @@ module tb_top;
 
     top #(
         .HALF_CYCLE_TICKS(HALF_CYCLE_TICKS),
+        .PHASE_TICK_DIV(1),
         .PHASE_MAX(PHASE_MAX),
         .ANGLE_STEP(ANGLE_STEP),
         .ANGLE_DEFAULT(ANGLE_DEFAULT),

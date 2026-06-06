@@ -6,17 +6,20 @@ module phase_counter #(
     input  wire clk,
     input  wire rst,
     input  wire zero_cross_pulse,
+    input  wire tick_enable,
     output reg  [$clog2(PHASE_MAX + 1)-1:0] phase_count
 );
     localparam integer PHASE_WIDTH = $clog2(PHASE_MAX + 1);
-    localparam [PHASE_WIDTH-1:0] PHASE_LIMIT = PHASE_WIDTH'(PHASE_MAX);
+    /* verilator lint_off WIDTH */
+    localparam [PHASE_WIDTH-1:0] PHASE_LIMIT = PHASE_MAX;
+    /* verilator lint_on WIDTH */
 
     always @(posedge clk) begin
         if (rst) begin
             phase_count <= 0;
         end else if (zero_cross_pulse) begin
             phase_count <= 0;
-        end else if (phase_count < PHASE_LIMIT) begin
+        end else if (tick_enable && phase_count < PHASE_LIMIT) begin
             phase_count <= phase_count + 1'b1;
         end
     end

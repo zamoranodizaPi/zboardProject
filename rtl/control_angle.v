@@ -14,9 +14,11 @@ module control_angle #(
 );
     localparam integer ANGLE_WIDTH = $clog2(PHASE_MAX + 1);
 
-    localparam [ANGLE_WIDTH-1:0] MAX_ANGLE = ANGLE_WIDTH'(PHASE_MAX);
-    localparam [ANGLE_WIDTH-1:0] STEP_ANGLE = ANGLE_WIDTH'(ANGLE_STEP);
-    localparam [ANGLE_WIDTH-1:0] DEFAULT_ANGLE = ANGLE_WIDTH'(ANGLE_DEFAULT);
+    /* verilator lint_off WIDTH */
+    localparam [ANGLE_WIDTH-1:0] MAX_ANGLE = PHASE_MAX;
+    localparam [ANGLE_WIDTH-1:0] STEP_ANGLE = ANGLE_STEP;
+    localparam [ANGLE_WIDTH-1:0] DEFAULT_ANGLE = ANGLE_DEFAULT;
+    /* verilator lint_on WIDTH */
 
     reg btn_up_d;
     reg btn_down_d;
