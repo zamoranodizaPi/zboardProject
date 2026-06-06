@@ -118,6 +118,18 @@ Este proyecto esta pensado como primer paso antes de:
 
 Para hardware industrial real se debe agregar aislamiento, deteccion segura de red, protecciones, temporizacion validada y revision electrica completa.
 
+## Demo ESP32 + Raspberry Pi 5
+
+Tambien se incluye un demo inicial para trabajar sin la placa Zynq fisica:
+
+```text
+demo/
+  esp32_angle_sim/   firmware PlatformIO/Arduino para simular angulo, Hall y cruce por cero
+  raspi_monitor/     monitor Python para configurar, visualizar y guardar telemetria
+```
+
+Ver `demo/README.md` para el flujo de prueba.
+
 ## Prueba segura en ZedBoard
 
 El repo incluye un wrapper para hardware real:

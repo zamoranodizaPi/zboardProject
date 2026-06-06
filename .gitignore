@@ -18,3 +18,5 @@ dfx_runtime.txt
 *.log
 *.o
 *.d
+__pycache__/
+*.pyc
