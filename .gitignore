@@ -1,0 +1,8 @@
+build/
+*.vcd
+*.fst
+*.lxt
+*.out
+*.log
+*.o
+*.d

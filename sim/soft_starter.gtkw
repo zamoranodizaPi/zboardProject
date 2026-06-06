@@ -1,0 +1,19 @@
+[*]
+[*] GTKWave save file for ZedBoard soft starter digital twin
+[*]
+[dumpfile] "build/waves.vcd"
+[timestart] 0
+[size] 1280 720
+[pos] -1 -1
+@28
+tb_top.clk
+tb_top.rst
+tb_top.sync_square
+tb_top.zero_cross_pulse
+tb_top.gate_pulse
+tb_top.btn_up
+tb_top.btn_down
+tb_top.btn_reset
+@22
+tb_top.phase_count[7:0]
+tb_top.angle_setpoint[7:0]

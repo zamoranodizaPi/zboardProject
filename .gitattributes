@@ -1,0 +1,7 @@
+*.v text eol=lf
+*.sv text eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.md text eol=lf
+*.gtkw text eol=lf
