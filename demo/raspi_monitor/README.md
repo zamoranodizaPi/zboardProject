@@ -30,5 +30,11 @@ a <angle>     cambia angulo de disparo 0..180
 e <0|1>       enable
 f <0|1>       fault
 r <accel>     aceleracion en deg/s2
+lhz <hz>      frecuencia de linea simulada
+vp <volts>    pico de tension fase-neutro simulado
+ip <amps>     pico de corriente simulado
+vdc <volts>   bus DC simulado
+pf <deg>      desfase corriente/tension
+n <fraction>  ruido de medicion, por ejemplo 0.002
 q             salir
 ```

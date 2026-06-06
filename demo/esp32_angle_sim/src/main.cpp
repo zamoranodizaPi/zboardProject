@@ -1,9 +1,14 @@
 #include <Arduino.h>
+#include <esp_system.h>
+#include <math.h>
 
 namespace {
 constexpr uint32_t kBaud = 115200;
 constexpr uint32_t kUpdatePeriodUs = 1000;
 constexpr uint32_t kPulseWidthUs = 1200;
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kDegToRad = kPi / 180.0f;
+constexpr int32_t kAdcPositiveFullScale = 8388607;
 
 constexpr uint8_t kPinZeroCross = 18;
 constexpr uint8_t kPinHallA = 19;
@@ -24,12 +29,25 @@ float speedDegPerSec = 0.0f;
 float targetSpeedDegPerSec = 30.0f;
 float accelDegPerSec2 = 180.0f;
 float angleSetpointDeg = 90.0f;
+float lineFrequencyHz = 60.0f;
+float voltagePeak = 170.0f;
+float currentPeak = 10.0f;
+float dcBusVolts = 325.0f;
+float temperatureC = 32.0f;
+float powerFactorAngleDeg = 25.0f;
+float measurementNoise = 0.002f;
+float adsFullScaleVolts[8] = {
+    250.0f, 250.0f, 250.0f, 25.0f, 25.0f, 25.0f, 500.0f, 150.0f,
+};
 
 uint32_t lastUpdateUs = 0;
 uint32_t lastStreamMs = 0;
 uint32_t streamPeriodMs = 100;
 uint32_t zeroCrossUntilUs = 0;
 uint32_t indexUntilUs = 0;
+float lineThetaDeg = 0.0f;
+float adsEng[8] = {};
+int32_t adsRaw[8] = {};
 
 String rxLine;
 
@@ -43,6 +61,37 @@ float wrap360(float value) {
   while (value >= 360.0f) value -= 360.0f;
   while (value < 0.0f) value += 360.0f;
   return value;
+}
+
+float noiseTerm(float scale) {
+  return scale * measurementNoise * (static_cast<float>(random(-1000, 1001)) / 1000.0f);
+}
+
+int32_t engineeringToAdcCode(float value, float fullScale) {
+  const float normalized = clampFloat(value / fullScale, -0.999999f, 0.999999f);
+  return static_cast<int32_t>(normalized * kAdcPositiveFullScale);
+}
+
+void updateAdsModel(float dt) {
+  lineThetaDeg = wrap360(lineThetaDeg + 360.0f * lineFrequencyHz * dt);
+  const float a = lineThetaDeg * kDegToRad;
+  const float b = (lineThetaDeg - 120.0f) * kDegToRad;
+  const float c = (lineThetaDeg + 120.0f) * kDegToRad;
+  const float iShift = powerFactorAngleDeg * kDegToRad;
+  const float loadScale = enabled && !fault ? clampFloat(fabsf(speedDegPerSec) / 360.0f, 0.05f, 1.0f) : 0.0f;
+
+  adsEng[0] = voltagePeak * sinf(a) + noiseTerm(voltagePeak);
+  adsEng[1] = voltagePeak * sinf(b) + noiseTerm(voltagePeak);
+  adsEng[2] = voltagePeak * sinf(c) + noiseTerm(voltagePeak);
+  adsEng[3] = currentPeak * loadScale * sinf(a - iShift) + noiseTerm(currentPeak);
+  adsEng[4] = currentPeak * loadScale * sinf(b - iShift) + noiseTerm(currentPeak);
+  adsEng[5] = currentPeak * loadScale * sinf(c - iShift) + noiseTerm(currentPeak);
+  adsEng[6] = dcBusVolts + 4.0f * sinf(2.0f * a) + noiseTerm(dcBusVolts);
+  adsEng[7] = temperatureC + 0.02f * fabsf(speedDegPerSec) + noiseTerm(temperatureC);
+
+  for (uint8_t i = 0; i < 8; ++i) {
+    adsRaw[i] = engineeringToAdcCode(adsEng[i], adsFullScaleVolts[i]);
+  }
 }
 
 void writeHall(uint8_t sector) {
@@ -68,7 +117,7 @@ uint8_t sectorFromTheta(float theta) {
 }
 
 void printHelp() {
-  Serial.println(F("OK commands: HELP, ENABLE 1|0, SPEED deg_per_s, ACCEL deg_per_s2, ANGLE 0..180, FAULT 1|0, STREAM ms, STATUS"));
+  Serial.println(F("OK commands: HELP, ENABLE 1|0, SPEED deg_per_s, ACCEL deg_per_s2, ANGLE 0..180, FAULT 1|0, STREAM ms, LINEHZ hz, VPEAK v, IPEAK a, VDC v, TEMP c, PFDEG deg, NOISE frac, STATUS"));
 }
 
 void printStatus() {
@@ -101,7 +150,39 @@ void printStatus() {
   Serial.print(F(" zc="));
   Serial.print(zeroCrossPulse ? 1 : 0);
   Serial.print(F(" idx="));
-  Serial.println(indexPulse ? 1 : 0);
+  Serial.print(indexPulse ? 1 : 0);
+  Serial.print(F(" va="));
+  Serial.print(adsEng[0], 2);
+  Serial.print(F(" vb="));
+  Serial.print(adsEng[1], 2);
+  Serial.print(F(" vc="));
+  Serial.print(adsEng[2], 2);
+  Serial.print(F(" ia="));
+  Serial.print(adsEng[3], 3);
+  Serial.print(F(" ib="));
+  Serial.print(adsEng[4], 3);
+  Serial.print(F(" ic="));
+  Serial.print(adsEng[5], 3);
+  Serial.print(F(" vdc="));
+  Serial.print(adsEng[6], 2);
+  Serial.print(F(" temp="));
+  Serial.print(adsEng[7], 2);
+  Serial.print(F(" adc0="));
+  Serial.print(adsRaw[0]);
+  Serial.print(F(" adc1="));
+  Serial.print(adsRaw[1]);
+  Serial.print(F(" adc2="));
+  Serial.print(adsRaw[2]);
+  Serial.print(F(" adc3="));
+  Serial.print(adsRaw[3]);
+  Serial.print(F(" adc4="));
+  Serial.print(adsRaw[4]);
+  Serial.print(F(" adc5="));
+  Serial.print(adsRaw[5]);
+  Serial.print(F(" adc6="));
+  Serial.print(adsRaw[6]);
+  Serial.print(F(" adc7="));
+  Serial.println(adsRaw[7]);
 }
 
 void acknowledge(const __FlashStringHelper *message) {
@@ -138,6 +219,27 @@ void handleCommand(String line) {
   } else if (cmd == "STREAM") {
     streamPeriodMs = static_cast<uint32_t>(clampFloat(arg.toFloat(), 10.0f, 5000.0f));
     acknowledge(F("STREAM"));
+  } else if (cmd == "LINEHZ") {
+    lineFrequencyHz = clampFloat(arg.toFloat(), 0.1f, 400.0f);
+    acknowledge(F("LINEHZ"));
+  } else if (cmd == "VPEAK") {
+    voltagePeak = clampFloat(arg.toFloat(), 0.0f, 240.0f);
+    acknowledge(F("VPEAK"));
+  } else if (cmd == "IPEAK") {
+    currentPeak = clampFloat(arg.toFloat(), 0.0f, 24.0f);
+    acknowledge(F("IPEAK"));
+  } else if (cmd == "VDC") {
+    dcBusVolts = clampFloat(arg.toFloat(), 0.0f, 480.0f);
+    acknowledge(F("VDC"));
+  } else if (cmd == "TEMP") {
+    temperatureC = clampFloat(arg.toFloat(), -40.0f, 125.0f);
+    acknowledge(F("TEMP"));
+  } else if (cmd == "PFDEG") {
+    powerFactorAngleDeg = clampFloat(arg.toFloat(), -89.0f, 89.0f);
+    acknowledge(F("PFDEG"));
+  } else if (cmd == "NOISE") {
+    measurementNoise = clampFloat(arg.toFloat(), 0.0f, 0.05f);
+    acknowledge(F("NOISE"));
   } else if (cmd == "STATUS") {
     printStatus();
   } else {
@@ -154,7 +256,7 @@ void readSerial() {
         handleCommand(rxLine);
         rxLine = "";
       }
-    } else if (rxLine.length() < 96) {
+    } else if (rxLine.length() < 128) {
       rxLine += c;
     }
   }
@@ -181,6 +283,7 @@ void updateSimulation(uint32_t nowUs) {
     speedDegPerSec = max(speedDegPerSec - maxDelta, desiredSpeed);
   }
 
+  updateAdsModel(dt);
   thetaDeg = wrap360(thetaDeg + speedDegPerSec * dt);
 
   const bool crossed180 = (previousTheta < 180.0f && thetaDeg >= 180.0f);
@@ -225,6 +328,7 @@ void setup() {
   pinMode(kPinGateWindow, OUTPUT);
 
   Serial.begin(kBaud);
+  randomSeed(esp_random());
   delay(200);
   printHelp();
 }

@@ -63,6 +63,18 @@ def normalize_user_command(line: str) -> str:
         return f"FAULT {arg}"
     if cmd == "r":
         return f"ACCEL {arg}"
+    if cmd == "lhz":
+        return f"LINEHZ {arg}"
+    if cmd == "vp":
+        return f"VPEAK {arg}"
+    if cmd == "ip":
+        return f"IPEAK {arg}"
+    if cmd == "vdc":
+        return f"VDC {arg}"
+    if cmd == "pf":
+        return f"PFDEG {arg}"
+    if cmd == "n":
+        return f"NOISE {arg}"
     if cmd == "q":
         return "QUIT"
     return line.upper()
@@ -80,11 +92,21 @@ def print_dashboard(fields: Dict[str, str]) -> None:
     gate = fields.get("gate", "-")
     zc = fields.get("zc", "-")
     idx = fields.get("idx", "-")
+    va = fields.get("va", "--")
+    vb = fields.get("vb", "--")
+    vc = fields.get("vc", "--")
+    ia = fields.get("ia", "--")
+    ib = fields.get("ib", "--")
+    ic = fields.get("ic", "--")
+    vdc = fields.get("vdc", "--")
+    temp = fields.get("temp", "--")
     sys.stdout.write(
         "\r"
         f"theta={theta:>7} deg  speed={speed:>8} target={target:>8}  "
         f"angle={angle:>6}  hall={hall} sector={sector}  "
-        f"en={enable} fault={fault} gate={gate} zc={zc} idx={idx}      "
+        f"en={enable} fault={fault} gate={gate} zc={zc} idx={idx}\n"
+        f"VA={va:>8} VB={vb:>8} VC={vc:>8}  "
+        f"IA={ia:>8} IB={ib:>8} IC={ic:>8}  VDC={vdc:>8} TEMP={temp:>7}      \033[F"
     )
     sys.stdout.flush()
 
@@ -111,6 +133,22 @@ def open_csv(path: str):
         "gate",
         "zc",
         "idx",
+        "va",
+        "vb",
+        "vc",
+        "ia",
+        "ib",
+        "ic",
+        "vdc",
+        "temp",
+        "adc0",
+        "adc1",
+        "adc2",
+        "adc3",
+        "adc4",
+        "adc5",
+        "adc6",
+        "adc7",
     ]
     writer = csv.DictWriter(handle, fieldnames=fieldnames)
     writer.writeheader()
@@ -157,7 +195,7 @@ def main() -> int:
         send_command(port, command)
         time.sleep(0.05)
 
-    print("Monitor listo. Comandos: s <speed>, a <angle>, e <0|1>, f <0|1>, r <accel>, q")
+    print("Monitor listo. Comandos: s <speed>, a <angle>, e <0|1>, f <0|1>, r <accel>, lhz <hz>, vp <v>, ip <a>, vdc <v>, pf <deg>, n <frac>, q")
 
     try:
         while not stop.is_set():

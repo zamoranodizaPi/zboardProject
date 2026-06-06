@@ -128,7 +128,7 @@ demo/
   raspi_monitor/     monitor Python para configurar, visualizar y guardar telemetria
 ```
 
-Ver `demo/README.md` para el flujo de prueba.
+El demo tambien incluye un modelo ADS131M08 virtual de 8 canales para generar `VA/VB/VC`, `IA/IB/IC`, `VDC`, `TEMP` y codigos crudos `adc0..adc7`. Ver `demo/README.md` para el flujo de prueba.
 
 ## Prueba segura en ZedBoard
 
