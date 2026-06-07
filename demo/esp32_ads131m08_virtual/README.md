@@ -70,6 +70,7 @@ HELP
 ENABLE 1|0
 FAULT 1|0
 ANGLE 0..180
+GATEDEG 1..45
 LINEHZ <hz>
 VPEAK <volts_peak>
 IPEAK <amps_peak>
@@ -85,4 +86,7 @@ Modo recomendado inicial:
 ENABLE 1
 LINEHZ 60
 ANGLE 90
+GATEDEG 15
 ```
+
+`GATEDEG` ensancha el pulso de gate para que el scope SPI lo capture de forma consistente. A 60 Hz, 15 grados equivalen aproximadamente a 694 us.

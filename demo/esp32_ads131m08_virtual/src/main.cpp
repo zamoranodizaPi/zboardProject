@@ -21,6 +21,7 @@ bool enabled = true;
 bool fault = false;
 float lineFrequencyHz = 60.0f;
 float angleSetpointDeg = 90.0f;
+float gateWidthDeg = 15.0f;
 float voltagePeak = 170.0f;
 float currentPeak = 10.0f;
 float dcBusVolts = 325.0f;
@@ -93,7 +94,7 @@ void updateModel() {
   const float phaseRad = thetaDeg * kDegToRad;
   const float halfCycleAngle = (thetaDeg >= 180.0f) ? thetaDeg - 180.0f : thetaDeg;
   const bool conducting = enabled && !fault && halfCycleAngle >= angleSetpointDeg;
-  const bool gateActive = enabled && !fault && halfCycleAngle >= angleSetpointDeg && halfCycleAngle < angleSetpointDeg + 4.0f;
+  const bool gateActive = enabled && !fault && halfCycleAngle >= angleSetpointDeg && halfCycleAngle < angleSetpointDeg + gateWidthDeg;
 
   vin = voltagePeak * sinf(phaseRad) + noiseTerm(voltagePeak);
   vmot = conducting ? vin : 0.0f;
@@ -128,7 +129,7 @@ void buildFrame() {
 }
 
 void printHelp() {
-  Serial.println(F("OK commands: HELP, ENABLE 1|0, FAULT 1|0, ANGLE 0..180, LINEHZ hz, VPEAK v, IPEAK a, VDC v, TEMP c, NOISE frac, STATUS"));
+  Serial.println(F("OK commands: HELP, ENABLE 1|0, FAULT 1|0, ANGLE 0..180, GATEDEG 1..45, LINEHZ hz, VPEAK v, IPEAK a, VDC v, TEMP c, NOISE frac, STATUS"));
 }
 
 void printStatus() {
@@ -140,6 +141,8 @@ void printStatus() {
   Serial.print(thetaDeg, 2);
   Serial.print(F(" angle="));
   Serial.print(angleSetpointDeg, 2);
+  Serial.print(F(" gatedeg="));
+  Serial.print(gateWidthDeg, 2);
   Serial.print(F(" linehz="));
   Serial.print(lineFrequencyHz, 2);
   Serial.print(F(" vin="));
@@ -177,6 +180,9 @@ void handleCommand(String line) {
   } else if (cmd == "ANGLE") {
     angleSetpointDeg = clampFloat(arg.toFloat(), 0.0f, 180.0f);
     acknowledge(F("ANGLE"));
+  } else if (cmd == "GATEDEG") {
+    gateWidthDeg = clampFloat(arg.toFloat(), 1.0f, 45.0f);
+    acknowledge(F("GATEDEG"));
   } else if (cmd == "LINEHZ") {
     lineFrequencyHz = clampFloat(arg.toFloat(), 0.1f, 400.0f);
     acknowledge(F("LINEHZ"));

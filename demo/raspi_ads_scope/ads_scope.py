@@ -201,12 +201,13 @@ class AdsReader:
             self.dropped += 1
             return None
         self.status = (frame[4] << 8) | frame[5]
+        gate_state = 1.0 if (self.status & 0x0004) else 0.0
         return {
             "vin": read_i24(frame, 6) / ADC_FS * 250.0,
             "vmot": read_i24(frame, 9) / ADC_FS * 250.0,
             "iload": read_i24(frame, 12) / ADC_FS * 25.0,
             "vdc": read_i24(frame, 15) / ADC_FS * 500.0,
-            "gate": read_i24(frame, 18) / ADC_FS,
+            "gate": gate_state,
             "theta": read_i24(frame, 21) / ADC_FS * 180.0 + 180.0,
             "temp": read_i24(frame, 24) / ADC_FS * 150.0,
             "fault": read_i24(frame, 27) / ADC_FS,
