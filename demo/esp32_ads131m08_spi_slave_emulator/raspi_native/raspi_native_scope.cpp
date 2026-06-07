@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -39,6 +40,8 @@ struct Args {
   uint8_t spi_mode = 0;
   int word_bits = 24;
   int sample_rate = 4000;
+  double line_hz = 60.0;
+  int cycles = 6;
   bool crc = false;
 };
 
@@ -244,6 +247,48 @@ std::string bar(double value, int width = 42) {
   return s;
 }
 
+size_t windowSamples(const Args &args) {
+  double samples = (static_cast<double>(args.sample_rate) * args.cycles) / args.line_hz;
+  return static_cast<size_t>(std::max(32.0, std::ceil(samples)));
+}
+
+char traceChar(int channel) {
+  static constexpr std::array<char, kChannels> chars = {
+      'A', 'B', 'C', 'N', 'a', 'b', 'c', 'n'};
+  return chars[channel];
+}
+
+std::vector<std::string> plotGroup(const std::deque<SampleFrame> &history,
+                                   const std::array<int, 4> &channels,
+                                   size_t wanted_samples, int width, int height) {
+  std::vector<std::string> rows(static_cast<size_t>(height), std::string(width, ' '));
+  if (history.empty()) return rows;
+
+  int mid = height / 2;
+  for (int x = 0; x < width; ++x) {
+    rows[mid][x] = '-';
+  }
+  for (int y = 0; y < height; ++y) {
+    rows[y][0] = '|';
+  }
+
+  size_t available = std::min(wanted_samples, history.size());
+  size_t start = history.size() - available;
+  for (int x = 0; x < width; ++x) {
+    size_t rel = width <= 1 ? 0 : static_cast<size_t>(
+        (static_cast<double>(x) * (available - 1)) / (width - 1));
+    const SampleFrame &sample = history[start + rel];
+    for (int ch : channels) {
+      double v = std::clamp(sample.norm[ch], -1.0, 1.0);
+      int y = static_cast<int>(std::round((1.0 - (v + 1.0) * 0.5) * (height - 1)));
+      y = std::clamp(y, 0, height - 1);
+      char &cell = rows[static_cast<size_t>(y)][x];
+      cell = (cell == ' ' || cell == '-' || cell == '|') ? traceChar(ch) : '*';
+    }
+  }
+  return rows;
+}
+
 void sendConfig(SerialPort &serial, const Args &args, const std::string &mode) {
   if (!serial.ok()) return;
   serial.send("BITS " + std::to_string(args.word_bits));
@@ -256,6 +301,7 @@ void sendConfig(SerialPort &serial, const Args &args, const std::string &mode) {
 }
 
 void render(const Args &args, const SerialPort &serial, const SampleFrame &sample,
+            const std::deque<SampleFrame> &history,
             uint64_t frames, uint64_t errors, double fps, const std::string &mode,
             const std::string &message) {
   std::cout << "\033[H\033[2J\033[?25l";
@@ -267,9 +313,24 @@ void render(const Args &args, const SerialPort &serial, const SampleFrame &sampl
   std::cout << "frames=" << frames << " errors=" << errors << " fps=" << std::fixed
             << std::setprecision(1) << fps << " status=0x" << std::hex << sample.status
             << std::dec << " mode=" << mode << "\n";
-  std::cout << "keys: q quit | s START | x STOP | m mode | r rate | b bits | c CONFIG\n";
+  std::cout << "window=" << args.cycles << " cycles @ " << std::fixed
+            << std::setprecision(1) << args.line_hz << "Hz"
+            << " samples=" << windowSamples(args) << "\n";
+  std::cout << "keys: q quit | s START | x STOP | m mode | r rate | b bits | +/- cycles | c CONFIG\n";
   if (!message.empty()) std::cout << "last: " << message << "\n";
   std::cout << "\n";
+
+  constexpr int graph_width = 112;
+  constexpr int graph_height = 13;
+  auto voltage = plotGroup(history, {0, 1, 2, 3}, windowSamples(args), graph_width, graph_height);
+  auto current = plotGroup(history, {4, 5, 6, 7}, windowSamples(args), graph_width, graph_height);
+
+  std::cout << "Voltages: A=VA B=VB C=VC N=VAN  (* overlap)\n";
+  for (const auto &row : voltage) std::cout << row << "\n";
+  std::cout << "\nCurrents: a=IA b=IB c=IC n=IN  (* overlap)\n";
+  for (const auto &row : current) std::cout << row << "\n";
+  std::cout << "\nInstant values\n";
+
   for (int i = 0; i < kChannels; ++i) {
     std::cout << kNames[i] << (std::strlen(kNames[i]) < 3 ? "  " : " ")
               << std::showpos << std::fixed << std::setprecision(4) << sample.norm[i]
@@ -301,7 +362,7 @@ void usage(const char *argv0) {
   std::cerr << "Usage: " << argv0
             << " [--spi-dev /dev/spidev0.0] [--serial /dev/ttyUSB0]"
             << " [--spi-hz 10000000] [--spi-mode 0] [--bits 24]"
-            << " [--rate 4000] [--crc]\n";
+            << " [--rate 4000] [--line-hz 60] [--cycles 6] [--crc]\n";
 }
 
 bool parseArgs(int argc, char **argv, Args &args) {
@@ -338,6 +399,14 @@ bool parseArgs(int argc, char **argv, Args &args) {
       const char *v = need("--rate");
       if (!v) return false;
       args.sample_rate = std::atoi(v);
+    } else if (a == "--line-hz") {
+      const char *v = need("--line-hz");
+      if (!v) return false;
+      args.line_hz = std::atof(v);
+    } else if (a == "--cycles") {
+      const char *v = need("--cycles");
+      if (!v) return false;
+      args.cycles = std::atoi(v);
     } else if (a == "--crc") {
       args.crc = true;
     } else if (a == "--help" || a == "-h") {
@@ -348,7 +417,8 @@ bool parseArgs(int argc, char **argv, Args &args) {
       return false;
     }
   }
-  return args.word_bits == 16 || args.word_bits == 24 || args.word_bits == 32;
+  return (args.word_bits == 16 || args.word_bits == 24 || args.word_bits == 32) &&
+         args.line_hz > 0.0 && args.cycles > 0;
 }
 
 }  // namespace
@@ -372,6 +442,7 @@ int main(int argc, char **argv) {
 
   RawTerminal terminal;
   SampleFrame sample;
+  std::deque<SampleFrame> history;
   uint64_t frames = 0;
   uint64_t errors = 0;
   uint64_t frames_at_last = 0;
@@ -409,12 +480,17 @@ int main(int argc, char **argv) {
       args.word_bits = kBits[bits_index];
       message = serial.send("BITS " + std::to_string(args.word_bits));
     }
+    if (key == '+') args.cycles = std::min(20, args.cycles + 1);
+    if (key == '-') args.cycles = std::max(1, args.cycles - 1);
 
     const size_t frame_bytes =
         static_cast<size_t>(1 + kChannels + (args.crc ? 1 : 0)) * (args.word_bits / 8);
     tx.assign(frame_bytes, 0);
     if (spi.transfer(tx, rx) && decodeFrame(rx, args, sample)) {
       ++frames;
+      history.push_back(sample);
+      size_t keep = std::max<size_t>(windowSamples(args) * 2, 256);
+      while (history.size() > keep) history.pop_front();
     } else {
       ++errors;
     }
@@ -427,7 +503,7 @@ int main(int argc, char **argv) {
       last_fps = now;
     }
     if (now - last_render >= std::chrono::milliseconds(80)) {
-      render(args, serial, sample, frames, errors, fps, mode, message);
+      render(args, serial, sample, history, frames, errors, fps, mode, message);
       last_render = now;
     }
 

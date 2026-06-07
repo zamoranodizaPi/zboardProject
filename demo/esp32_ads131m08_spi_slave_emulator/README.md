@@ -56,10 +56,11 @@ make
 Ejecutar:
 
 ```bash
-./raspi_native_scope --spi-dev /dev/spidev0.0 --serial /dev/ttyUSB0 --spi-hz 10000000 --bits 24 --rate 4000
+./raspi_native_scope --spi-dev /dev/spidev0.0 --serial /dev/ttyUSB0 --spi-hz 10000000 --bits 24 --rate 4000 --line-hz 60 --cycles 6
 ```
 
-La app corre en foreground y se cierra con `q`.
+La app corre en foreground y se cierra con `q`. Dibuja una ventana de osciloscopio
+de 6 ciclos por defecto, separando voltajes y corrientes.
 
 Teclas:
 
@@ -70,6 +71,8 @@ x  STOP
 m  cambiar modo de senal
 r  cambiar sample rate
 b  cambiar bits por palabra
++  aumentar ciclos visibles
+-  reducir ciclos visibles
 c  pedir CONFIG al ESP32
 ```
 
