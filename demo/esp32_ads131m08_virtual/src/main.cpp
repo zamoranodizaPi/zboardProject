@@ -20,6 +20,7 @@ constexpr int kPinDrdy = 4;
 bool enabled = true;
 bool fault = false;
 float lineFrequencyHz = 60.0f;
+float sampleRateHz = 3000.0f;
 float angleSetpointDeg = 90.0f;
 float gateWidthDeg = 15.0f;
 float voltagePeak = 170.0f;
@@ -33,7 +34,6 @@ float vmot = 0.0f;
 float iload = 0.0f;
 float gate = 0.0f;
 uint16_t sequence = 0;
-uint32_t lastSampleUs = 0;
 String rxLine;
 
 WORD_ALIGNED_ATTR uint8_t txFrame[kFrameBytes];
@@ -82,14 +82,7 @@ uint16_t checksum16(const uint8_t *buffer, size_t length) {
 }
 
 void updateModel() {
-  const uint32_t nowUs = micros();
-  if (lastSampleUs == 0) {
-    lastSampleUs = nowUs;
-  }
-  const uint32_t elapsedUs = nowUs - lastSampleUs;
-  lastSampleUs = nowUs;
-  const float dt = elapsedUs / 1000000.0f;
-
+  const float dt = 1.0f / sampleRateHz;
   thetaDeg = wrap360(thetaDeg + 360.0f * lineFrequencyHz * dt);
   const float phaseRad = thetaDeg * kDegToRad;
   const float halfCycleAngle = (thetaDeg >= 180.0f) ? thetaDeg - 180.0f : thetaDeg;
@@ -129,7 +122,7 @@ void buildFrame() {
 }
 
 void printHelp() {
-  Serial.println(F("OK commands: HELP, ENABLE 1|0, FAULT 1|0, ANGLE 0..180, GATEDEG 1..45, LINEHZ hz, VPEAK v, IPEAK a, VDC v, TEMP c, NOISE frac, STATUS"));
+  Serial.println(F("OK commands: HELP, ENABLE 1|0, FAULT 1|0, ANGLE 0..180, GATEDEG 1..45, LINEHZ hz, FS samples_per_s, VPEAK v, IPEAK a, VDC v, TEMP c, NOISE frac, STATUS"));
 }
 
 void printStatus() {
@@ -145,6 +138,8 @@ void printStatus() {
   Serial.print(gateWidthDeg, 2);
   Serial.print(F(" linehz="));
   Serial.print(lineFrequencyHz, 2);
+  Serial.print(F(" fs="));
+  Serial.print(sampleRateHz, 0);
   Serial.print(F(" vin="));
   Serial.print(vin, 2);
   Serial.print(F(" vmot="));
@@ -186,6 +181,9 @@ void handleCommand(String line) {
   } else if (cmd == "LINEHZ") {
     lineFrequencyHz = clampFloat(arg.toFloat(), 0.1f, 400.0f);
     acknowledge(F("LINEHZ"));
+  } else if (cmd == "FS") {
+    sampleRateHz = clampFloat(arg.toFloat(), 500.0f, 20000.0f);
+    acknowledge(F("FS"));
   } else if (cmd == "VPEAK") {
     voltagePeak = clampFloat(arg.toFloat(), 0.0f, 240.0f);
     acknowledge(F("VPEAK"));

@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import glob
 import threading
 import time
 from collections import deque
@@ -11,6 +12,7 @@ from typing import Deque, Dict, List
 from urllib.parse import urlparse
 
 import spidev
+import serial
 
 
 FRAME_BYTES = 32
@@ -92,10 +94,15 @@ INDEX_HTML = r"""<!doctype html>
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.beginPath();
+        let open = false;
         samples.forEach((s, i) => {
           const x = i * canvas.width / Math.max(1, samples.length - 1);
           const y = canvas.height * 0.50 - (s[key] / scale) * canvas.height * 0.38;
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          const prev = samples[i - 1];
+          const thetaJump = prev ? Math.abs((s.theta || 0) - (prev.theta || 0)) : 0;
+          const wrapped = prev && (prev.theta || 0) > 330 && (s.theta || 0) < 30;
+          const discontinuity = i === 0 || (thetaJump > 35 && !wrapped);
+          if (discontinuity || !open) { ctx.moveTo(x, y); open = true; } else ctx.lineTo(x, y);
         });
         ctx.stroke();
       }
@@ -263,6 +270,31 @@ def make_handler(reader: AdsReader):
     return Handler
 
 
+def configure_virtual_adc(sample_rate: int) -> None:
+    ports = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+    if not ports:
+        return
+    for port_name in ports:
+        try:
+            with serial.Serial(port_name, 115200, timeout=0.2) as port:
+                time.sleep(0.2)
+                for command in (
+                    "ENABLE 1",
+                    "FAULT 0",
+                    "LINEHZ 60",
+                    f"FS {sample_rate}",
+                    "ANGLE 90",
+                    "GATEDEG 15",
+                    "STATUS",
+                ):
+                    port.write((command + "\n").encode("ascii"))
+                    port.flush()
+                    time.sleep(0.03)
+            return
+        except serial.SerialException:
+            continue
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ADS131M08 virtual SPI scope.")
     parser.add_argument("--spi-bus", type=int, default=0)
@@ -274,6 +306,7 @@ def main() -> int:
     parser.add_argument("--http-port", type=int, default=8090)
     args = parser.parse_args()
 
+    configure_virtual_adc(args.sample_rate)
     reader = AdsReader(args.spi_bus, args.spi_device, args.sample_rate, args.spi_hz, args.history)
     reader.start()
     server = ThreadingHTTPServer((args.host, args.http_port), make_handler(reader))

@@ -78,6 +78,7 @@ FAULT 1|0
 ANGLE 0..180
 GATEDEG 1..45
 LINEHZ <hz>
+FS <samples_per_s>
 VPEAK <volts_peak>
 IPEAK <amps_peak>
 VDC <volts>
@@ -91,8 +92,11 @@ Modo recomendado inicial:
 ```text
 ENABLE 1
 LINEHZ 60
+FS 3000
 ANGLE 90
 GATEDEG 15
 ```
+
+`FS` define el avance interno de fase del ADC virtual. Debe coincidir con el `--sample-rate` del scope Raspberry para que la senoide sea estable.
 
 `GATEDEG` ensancha el pulso de gate para que el scope SPI lo capture de forma consistente. A 60 Hz, 15 grados equivalen aproximadamente a 694 us.

@@ -25,6 +25,17 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
+El scope intenta configurar el ESP32 por USB serial antes de abrir SPI:
+
+```text
+ENABLE 1
+FAULT 0
+LINEHZ 60
+FS <sample-rate>
+ANGLE 90
+GATEDEG 15
+```
+
 ## Ejecutar
 
 ```bash
