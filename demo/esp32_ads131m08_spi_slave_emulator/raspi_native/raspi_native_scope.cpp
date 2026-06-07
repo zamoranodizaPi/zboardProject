@@ -51,6 +51,19 @@ struct SampleFrame {
   std::array<double, kChannels> norm{};
 };
 
+struct TerminalSize {
+  int cols = 100;
+  int rows = 32;
+};
+
+TerminalSize terminalSize() {
+  winsize ws{};
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+    return {static_cast<int>(ws.ws_col), static_cast<int>(ws.ws_row)};
+  }
+  return {};
+}
+
 std::string autoSerialPort() {
   for (const auto &prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
     for (int i = 0; i < 8; ++i) {
@@ -304,6 +317,12 @@ void render(const Args &args, const SerialPort &serial, const SampleFrame &sampl
             const std::deque<SampleFrame> &history,
             uint64_t frames, uint64_t errors, double fps, const std::string &mode,
             const std::string &message) {
+  TerminalSize term = terminalSize();
+  int graph_width = std::clamp(term.cols - 2, 40, 160);
+  int reserved_rows = 16;  // compact header, labels, and 8 instant-value rows
+  int available_graph_rows = std::max(8, term.rows - reserved_rows);
+  int graph_height = std::clamp(available_graph_rows / 2, 4, 13);
+
   std::cout << "\033[H\033[2J\033[?25l";
   std::cout << "ESP32 ADS131M08 native Raspberry scope\n";
   std::cout << "SPI " << args.spi_dev << " mode=" << static_cast<int>(args.spi_mode)
@@ -316,20 +335,17 @@ void render(const Args &args, const SerialPort &serial, const SampleFrame &sampl
   std::cout << "window=" << args.cycles << " cycles @ " << std::fixed
             << std::setprecision(1) << args.line_hz << "Hz"
             << " samples=" << windowSamples(args) << "\n";
-  std::cout << "keys: q quit | s START | x STOP | m mode | r rate | b bits | +/- cycles | c CONFIG\n";
-  if (!message.empty()) std::cout << "last: " << message << "\n";
-  std::cout << "\n";
+  std::cout << "keys: q quit | s/x start/stop | m mode | r rate | b bits | +/- cycles | c config\n";
+  std::cout << "last: " << (message.empty() ? "-" : message) << "\n";
 
-  constexpr int graph_width = 112;
-  constexpr int graph_height = 13;
   auto voltage = plotGroup(history, {0, 1, 2, 3}, windowSamples(args), graph_width, graph_height);
   auto current = plotGroup(history, {4, 5, 6, 7}, windowSamples(args), graph_width, graph_height);
 
   std::cout << "Voltages: A=VA B=VB C=VC N=VAN  (* overlap)\n";
   for (const auto &row : voltage) std::cout << row << "\n";
-  std::cout << "\nCurrents: a=IA b=IB c=IC n=IN  (* overlap)\n";
+  std::cout << "Currents: a=IA b=IB c=IC n=IN  (* overlap)\n";
   for (const auto &row : current) std::cout << row << "\n";
-  std::cout << "\nInstant values\n";
+  std::cout << "Instant values\n";
 
   for (int i = 0; i < kChannels; ++i) {
     std::cout << kNames[i] << (std::strlen(kNames[i]) < 3 ? "  " : " ")
