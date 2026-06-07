@@ -12,6 +12,7 @@ Raspberry Pi 5  <--- USB serial --->  ESP32
 
 - `esp32_angle_sim/`: firmware PlatformIO/Arduino para simular angulo electrico, cruce por cero, Hall y estados.
 - `raspi_monitor/`: herramienta Python para configurar el ESP32, visualizar telemetria y guardar CSV.
+- `raspi_web/`: dashboard web local para configurar y medir desde el navegador.
 
 ## Flujo recomendado
 
@@ -28,6 +29,19 @@ python monitor.py --port /dev/ttyUSB0 --speed 30 --log logs/demo.csv
 ```
 
 En Windows, el puerto suele ser `COM3`, `COM4`, etc.
+
+Para abrir la interfaz web en la Raspberry:
+
+```bash
+cd /home/pi/zboardProject/demo/raspi_web
+python3 web_dashboard.py --port /dev/ttyUSB0 --host 0.0.0.0 --http-port 8080
+```
+
+Luego abre:
+
+```text
+http://192.168.1.120:8080
+```
 
 ## Protocolo serial
 
