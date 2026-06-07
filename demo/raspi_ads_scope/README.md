@@ -40,7 +40,7 @@ GATEDEG <gate-deg>
 ## Ejecutar
 
 ```bash
-python ads_scope.py --spi-bus 0 --spi-device 0 --sample-rate 800 --line-hz 10 --http-port 8090
+python ads_scope.py --spi-bus 0 --spi-device 0 --sample-rate 500 --line-hz 10 --gate-deg 30 --http-port 8090
 ```
 
 Abrir:
