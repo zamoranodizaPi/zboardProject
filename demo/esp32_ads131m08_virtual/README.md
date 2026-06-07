@@ -32,6 +32,12 @@ Arduino IDE:
 demo/esp32_ads131m08_virtual/arduino/esp32_ads131m08_virtual/esp32_ads131m08_virtual.ino
 ```
 
+El sketch Arduino debe mostrar arriba el comentario:
+
+```text
+Required firmware baseline: commit 4d8c2d5
+```
+
 ## SPI
 
 ```text
