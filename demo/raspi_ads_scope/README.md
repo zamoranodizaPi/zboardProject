@@ -28,7 +28,7 @@ pip install -r requirements.txt
 ## Ejecutar
 
 ```bash
-python ads_scope.py --spi-bus 0 --spi-device 0 --sample-rate 5000 --http-port 8090
+python ads_scope.py --spi-bus 0 --spi-device 0 --sample-rate 3000 --http-port 8090
 ```
 
 Abrir:

@@ -127,7 +127,7 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById("state").textContent = "HTTP error";
       }
     }
-    setInterval(poll, 100);
+    setInterval(poll, 200);
     poll();
   </script>
 </body>
@@ -266,9 +266,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="ADS131M08 virtual SPI scope.")
     parser.add_argument("--spi-bus", type=int, default=0)
     parser.add_argument("--spi-device", type=int, default=0)
-    parser.add_argument("--sample-rate", type=int, default=5000)
+    parser.add_argument("--sample-rate", type=int, default=3000)
     parser.add_argument("--spi-hz", type=int, default=1000000)
-    parser.add_argument("--history", type=int, default=1200)
+    parser.add_argument("--history", type=int, default=600)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--http-port", type=int, default=8090)
     args = parser.parse_args()
