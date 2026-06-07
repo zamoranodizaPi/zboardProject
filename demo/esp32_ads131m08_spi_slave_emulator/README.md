@@ -5,6 +5,7 @@ Este demo contiene:
 - `esp32_ads131m08_spi_slave_emulator.ino`: ESP32-WROOM-32 como SPI slave que emula streaming ADS131M08.
 - `raspi_master_scope.py`: Raspberry Pi como SPI master con osciloscopio web y control Serial del ESP32.
 - `raspi_native_scope.cpp`: aplicacion nativa de terminal para Raspberry Pi, sin web ni servicios.
+- `raspi_sdl_scope/`: aplicacion C++ SDL2 fullscreen estilo instrumento, para Raspberry Pi OS Lite/appliance.
 
 ## Conexiones
 
@@ -75,6 +76,12 @@ b  cambiar bits por palabra
 -  reducir ciclos visibles
 c  pedir CONFIG al ESP32
 ```
+
+### Opcion instrumento fullscreen SDL2
+
+Ver [raspi_sdl_scope/README.md](raspi_sdl_scope/README.md). Esta version esta
+pensada para Raspberry Pi OS Bookworm Lite, arranque directo por systemd y UI
+fullscreen estilo osciloscopio industrial.
 
 ### Opcion web Python
 

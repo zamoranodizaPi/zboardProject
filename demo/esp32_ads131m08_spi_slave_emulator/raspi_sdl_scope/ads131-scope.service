@@ -1,0 +1,19 @@
+[Unit]
+Description=ADS131M08 SDL Instrument Scope
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/zboardProject/demo/esp32_ads131m08_spi_slave_emulator/raspi_sdl_scope
+Environment=SDL_VIDEODRIVER=kmsdrm
+Environment=SDL_AUDIODRIVER=dummy
+ExecStart=/usr/local/bin/ads131_scope_sdl --spi-dev /dev/spidev0.0 --serial /dev/ttyUSB0 --spi-hz 10000000 --bits 24 --rate 4000 --channels 8
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
