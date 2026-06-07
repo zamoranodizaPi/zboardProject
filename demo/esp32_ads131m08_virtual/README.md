@@ -35,7 +35,7 @@ demo/esp32_ads131m08_virtual/arduino/esp32_ads131m08_virtual/esp32_ads131m08_vir
 El sketch Arduino debe mostrar arriba el comentario:
 
 ```text
-Required firmware baseline: commit 5053dea
+Required firmware baseline: commit 24c2be4
 ```
 
 ## SPI
