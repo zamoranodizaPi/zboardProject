@@ -4,6 +4,7 @@ Este demo contiene:
 
 - `esp32_ads131m08_spi_slave_emulator.ino`: ESP32-WROOM-32 como SPI slave que emula streaming ADS131M08.
 - `raspi_master_scope.py`: Raspberry Pi como SPI master con osciloscopio web y control Serial del ESP32.
+- `raspi_native_scope.cpp`: aplicacion nativa de terminal para Raspberry Pi, sin web ni servicios.
 
 ## Conexiones
 
@@ -41,6 +42,37 @@ pip install -r requirements.txt
 ```
 
 ## Ejecutar
+
+### Opcion nativa sin web
+
+Compilar en la Raspberry:
+
+```bash
+cd /home/pi/zboardProject/demo/esp32_ads131m08_spi_slave_emulator
+make
+```
+
+Ejecutar:
+
+```bash
+./raspi_native_scope --spi-dev /dev/spidev0.0 --serial /dev/ttyUSB0 --spi-hz 10000000 --bits 24 --rate 4000
+```
+
+La app corre en foreground y se cierra con `q`.
+
+Teclas:
+
+```text
+q  salir
+s  START
+x  STOP
+m  cambiar modo de senal
+r  cambiar sample rate
+b  cambiar bits por palabra
+c  pedir CONFIG al ESP32
+```
+
+### Opcion web Python
 
 ```bash
 python raspi_master_scope.py --spi-bus 0 --spi-device 0 --spi-hz 10000000 --word-bits 24 --sample-rate 4000 --http-port 8091
