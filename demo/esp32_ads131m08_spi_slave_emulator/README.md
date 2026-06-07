@@ -49,6 +49,7 @@ Compilar en la Raspberry:
 
 ```bash
 cd /home/pi/zboardProject/demo/esp32_ads131m08_spi_slave_emulator
+cd raspi_native
 make
 ```
 
