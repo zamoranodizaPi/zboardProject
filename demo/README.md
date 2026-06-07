@@ -76,3 +76,5 @@ CH7 / temp  temperatura simulada
 ```
 
 La telemetria incluye valores de ingenieria (`va`, `ia`, etc.) y codigos crudos firmados de 24 bits (`adc0`..`adc7`). Esto no emula todavia el protocolo SPI real del ADS131M08; es una capa de simulacion para construir configuracion, medicion, tendencias y registro en la Raspberry antes de conectar hardware de adquisicion real.
+
+Ademas se publican `vma`, `vmb` y `vmc`: voltajes simulados que le llegarian al motor despues del recorte por SCR. Estos se calculan desde `va/vb/vc`, `ENABLE`, `FAULT` y el angulo `ANGLE`.

@@ -177,6 +177,22 @@ INDEX_HTML = r"""<!doctype html>
       display: grid;
       gap: 10px;
     }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .legend span::before {
+      content: "";
+      display: inline-block;
+      width: 18px;
+      height: 3px;
+      margin-right: 6px;
+      vertical-align: middle;
+      background: var(--c);
+    }
     canvas {
       width: 100%;
       height: 210px;
@@ -239,19 +255,28 @@ INDEX_HTML = r"""<!doctype html>
         <div class="metric"><span>VB</span><strong id="vb">--</strong></div>
         <div class="metric"><span>VC</span><strong id="vc">--</strong></div>
         <div class="metric"><span>VDC</span><strong id="vdc">--</strong></div>
+        <div class="metric"><span>VMA</span><strong id="vma">--</strong></div>
+        <div class="metric"><span>VMB</span><strong id="vmb">--</strong></div>
+        <div class="metric"><span>VMC</span><strong id="vmc">--</strong></div>
+        <div class="metric"><span>Gate</span><strong id="gateLive">--</strong></div>
         <div class="metric"><span>IA</span><strong id="ia">--</strong></div>
         <div class="metric"><span>IB</span><strong id="ib">--</strong></div>
         <div class="metric"><span>IC</span><strong id="ic">--</strong></div>
         <div class="metric"><span>Temp</span><strong id="temp">--</strong></div>
       </div>
       <div class="strip">
+        <div class="legend">
+          <span style="--c:#6aa6ff">VA input</span>
+          <span style="--c:#39b980">VMA motor</span>
+          <span style="--c:#e7b84d">Gate pulse</span>
+        </div>
         <canvas id="wave" width="900" height="260"></canvas>
         <div class="metric small"><span>Raw ADS131M08 codes</span><strong id="raw">--</strong></div>
       </div>
     </section>
   </main>
   <script>
-    const history = { va: [], vb: [], vc: [], ia: [] };
+    const history = { va: [], vma: [], gate: [] };
     const maxPoints = 240;
     const ids = ["theta","speedLive","set","state","va","vb","vc","vdc","ia","ib","ic","temp","raw"];
 
@@ -310,9 +335,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       const series = [
         ["va", "#6aa6ff", 220],
-        ["vb", "#39b980", 220],
-        ["vc", "#e7b84d", 220],
-        ["ia", "#ee6b63", 20]
+        ["vma", "#39b980", 220]
       ];
       for (const [key, color, scale] of series) {
         ctx.strokeStyle = color;
@@ -325,6 +348,15 @@ INDEX_HTML = r"""<!doctype html>
         });
         ctx.stroke();
       }
+      ctx.strokeStyle = "#e7b84d";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      history.gate.forEach((value, index) => {
+        const x = index * canvas.width / Math.max(1, maxPoints - 1);
+        const y = value > 0 ? canvas.height * 0.08 : canvas.height * 0.18;
+        if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
     }
     function pushHistory(fields) {
       for (const key of Object.keys(history)) {
@@ -353,6 +385,10 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById("vb").textContent = `${num(f.vb)} V`;
         document.getElementById("vc").textContent = `${num(f.vc)} V`;
         document.getElementById("vdc").textContent = `${num(f.vdc)} V`;
+        document.getElementById("vma").textContent = `${num(f.vma)} V`;
+        document.getElementById("vmb").textContent = `${num(f.vmb)} V`;
+        document.getElementById("vmc").textContent = `${num(f.vmc)} V`;
+        document.getElementById("gateLive").textContent = f.gate || "--";
         document.getElementById("ia").textContent = `${num(f.ia, 3)} A`;
         document.getElementById("ib").textContent = `${num(f.ib, 3)} A`;
         document.getElementById("ic").textContent = `${num(f.ic, 3)} A`;

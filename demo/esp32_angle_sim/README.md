@@ -64,7 +64,7 @@ TEL t_ms=1234 en=1 fault=0 theta=45.20 speed=60.00 set=90 sector=0 hall=100 gate
 La misma linea tambien agrega el modelo ADS virtual:
 
 ```text
-va vb vc ia ib ic vdc temp adc0 adc1 adc2 adc3 adc4 adc5 adc6 adc7
+va vb vc vma vmb vmc ia ib ic vdc temp adc0 adc1 adc2 adc3 adc4 adc5 adc6 adc7
 ```
 
 Mapeo inicial:
@@ -73,6 +73,9 @@ Mapeo inicial:
 adc0 va   tension fase A
 adc1 vb   tension fase B
 adc2 vc   tension fase C
+vma       tension fase A aplicada al motor despues del SCR
+vmb       tension fase B aplicada al motor despues del SCR
+vmc       tension fase C aplicada al motor despues del SCR
 adc3 ia   corriente fase A
 adc4 ib   corriente fase B
 adc5 ic   corriente fase C

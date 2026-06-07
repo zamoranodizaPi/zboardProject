@@ -46,6 +46,7 @@ uint32_t streamPeriodMs = 100;
 uint32_t zeroCrossUntilUs = 0;
 uint32_t indexUntilUs = 0;
 float lineThetaDeg = 0.0f;
+float motorVoltage[3] = {};
 float adsEng[8] = {};
 int32_t adsRaw[8] = {};
 
@@ -83,6 +84,14 @@ void updateAdsModel(float dt) {
   adsEng[0] = voltagePeak * sinf(a) + noiseTerm(voltagePeak);
   adsEng[1] = voltagePeak * sinf(b) + noiseTerm(voltagePeak);
   adsEng[2] = voltagePeak * sinf(c) + noiseTerm(voltagePeak);
+
+  const float phaseAngles[3] = {lineThetaDeg, wrap360(lineThetaDeg - 120.0f), wrap360(lineThetaDeg + 120.0f)};
+  for (uint8_t i = 0; i < 3; ++i) {
+    const float halfCycleAngle = (phaseAngles[i] >= 180.0f) ? phaseAngles[i] - 180.0f : phaseAngles[i];
+    const bool scrConducting = enabled && !fault && halfCycleAngle >= angleSetpointDeg;
+    motorVoltage[i] = scrConducting ? adsEng[i] : 0.0f;
+  }
+
   adsEng[3] = currentPeak * loadScale * sinf(a - iShift) + noiseTerm(currentPeak);
   adsEng[4] = currentPeak * loadScale * sinf(b - iShift) + noiseTerm(currentPeak);
   adsEng[5] = currentPeak * loadScale * sinf(c - iShift) + noiseTerm(currentPeak);
@@ -157,6 +166,12 @@ void printStatus() {
   Serial.print(adsEng[1], 2);
   Serial.print(F(" vc="));
   Serial.print(adsEng[2], 2);
+  Serial.print(F(" vma="));
+  Serial.print(motorVoltage[0], 2);
+  Serial.print(F(" vmb="));
+  Serial.print(motorVoltage[1], 2);
+  Serial.print(F(" vmc="));
+  Serial.print(motorVoltage[2], 2);
   Serial.print(F(" ia="));
   Serial.print(adsEng[3], 3);
   Serial.print(F(" ib="));

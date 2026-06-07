@@ -95,6 +95,9 @@ def print_dashboard(fields: Dict[str, str]) -> None:
     va = fields.get("va", "--")
     vb = fields.get("vb", "--")
     vc = fields.get("vc", "--")
+    vma = fields.get("vma", "--")
+    vmb = fields.get("vmb", "--")
+    vmc = fields.get("vmc", "--")
     ia = fields.get("ia", "--")
     ib = fields.get("ib", "--")
     ic = fields.get("ic", "--")
@@ -106,6 +109,7 @@ def print_dashboard(fields: Dict[str, str]) -> None:
         f"angle={angle:>6}  hall={hall} sector={sector}  "
         f"en={enable} fault={fault} gate={gate} zc={zc} idx={idx}\n"
         f"VA={va:>8} VB={vb:>8} VC={vc:>8}  "
+        f"VMA={vma:>8} VMB={vmb:>8} VMC={vmc:>8}  "
         f"IA={ia:>8} IB={ib:>8} IC={ic:>8}  VDC={vdc:>8} TEMP={temp:>7}      \033[F"
     )
     sys.stdout.flush()
@@ -136,6 +140,9 @@ def open_csv(path: str):
         "va",
         "vb",
         "vc",
+        "vma",
+        "vmb",
+        "vmc",
         "ia",
         "ib",
         "ic",
