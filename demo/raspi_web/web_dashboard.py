@@ -234,7 +234,7 @@ INDEX_HTML = r"""<!doctype html>
         <input id="speedRange" type="range" min="-720" max="720" value="60" step="1">
         <div class="control"><label>Trigger angle deg</label><input id="angle" type="number" value="90" min="0" max="180" step="1"></div>
         <input id="angleRange" type="range" min="0" max="180" value="90" step="1">
-        <div class="control"><label>Line frequency Hz</label><input id="linehz" type="number" value="60" step="0.1"></div>
+        <div class="control"><label>Line frequency Hz</label><input id="linehz" type="number" value="1" step="0.1"></div>
         <div class="control"><label>Voltage peak V</label><input id="vpeak" type="number" value="170" step="1"></div>
         <div class="control"><label>Current peak A</label><input id="ipeak" type="number" value="10" step="0.1"></div>
         <div class="control"><label>DC bus V</label><input id="vdcSet" type="number" value="325" step="1"></div>
@@ -401,7 +401,7 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById("link").textContent = "HTTP error";
       }
     }
-    setInterval(poll, 250);
+    setInterval(poll, 50);
     poll();
   </script>
 </body>
@@ -433,7 +433,7 @@ class SerialBridge:
 
     def start(self) -> None:
         self.thread.start()
-        for command in ("STREAM 100", "ENABLE 1", "SPEED 60", "ANGLE 90", "STATUS"):
+        for command in ("STREAM 20", "LINEHZ 1", "ENABLE 1", "SPEED 60", "ANGLE 90", "STATUS"):
             self.send(command)
             time.sleep(0.05)
 

@@ -60,6 +60,13 @@ STREAM 10
 
 El ESP32 responde con lineas `TEL ...` que la Raspberry parsea para mostrar y guardar datos.
 
+Para ver la forma de onda recortada en la interfaz se usa modo demo lento:
+
+```text
+LINEHZ 1
+STREAM 20
+```
+
 ## Nivel ADS131M08 virtual
 
 El simulador tambien genera 8 canales como si fueran muestras escaladas desde un ADC multicanal:

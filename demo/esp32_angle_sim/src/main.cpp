@@ -29,7 +29,7 @@ float speedDegPerSec = 0.0f;
 float targetSpeedDegPerSec = 30.0f;
 float accelDegPerSec2 = 180.0f;
 float angleSetpointDeg = 90.0f;
-float lineFrequencyHz = 60.0f;
+float lineFrequencyHz = 1.0f;
 float voltagePeak = 170.0f;
 float currentPeak = 10.0f;
 float dcBusVolts = 325.0f;
@@ -42,7 +42,7 @@ float adsFullScaleVolts[8] = {
 
 uint32_t lastUpdateUs = 0;
 uint32_t lastStreamMs = 0;
-uint32_t streamPeriodMs = 100;
+uint32_t streamPeriodMs = 20;
 uint32_t zeroCrossUntilUs = 0;
 uint32_t indexUntilUs = 0;
 float lineThetaDeg = 0.0f;

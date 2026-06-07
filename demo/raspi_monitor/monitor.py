@@ -169,7 +169,7 @@ def main() -> int:
     parser.add_argument("--speed", type=float, default=30.0, help="Velocidad electrica inicial en deg/s.")
     parser.add_argument("--accel", type=float, default=180.0, help="Aceleracion inicial en deg/s2.")
     parser.add_argument("--angle", type=float, default=90.0, help="Angulo de disparo inicial 0..180.")
-    parser.add_argument("--stream-ms", type=int, default=100, help="Periodo de telemetria.")
+    parser.add_argument("--stream-ms", type=int, default=20, help="Periodo de telemetria.")
     parser.add_argument("--log", default="", help="Ruta CSV opcional.")
     args = parser.parse_args()
 
