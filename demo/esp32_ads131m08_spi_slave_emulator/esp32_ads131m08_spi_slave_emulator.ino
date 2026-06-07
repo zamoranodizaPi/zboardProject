@@ -80,8 +80,14 @@ static bool ENABLE_CRC = false;
 
 static const float DEFAULT_SINE_FREQ_HZ = 60.0f;
 static const float DEFAULT_AMPLITUDE = 0.8f;  // fraction of 24-bit full-scale
+static const float DEFAULT_CURRENT_AMPLITUDE = 0.55f;
+static const float DEFAULT_POWER_FACTOR_LAG_DEG = 30.0f;
 static const int32_t DEFAULT_OFFSET = 0;
 static const int32_t DEFAULT_CONSTANT = 1000;
+
+static const char *CHANNEL_NAMES[NUM_CHANNELS] = {
+  "VA", "VB", "VC", "VAN", "IA", "IB", "IC", "IN"
+};
 
 // ----------------------------- TYPES ----------------------------------
 
@@ -98,6 +104,7 @@ struct ChannelConfig {
   int32_t constantValue;
   float sineFreqHz;
   float amplitude;
+  float phaseOffsetDeg;
   int32_t offset;
   uint32_t phase;       // 32-bit phase accumulator
   uint32_t phaseStep;
@@ -201,6 +208,12 @@ static void updateChannelPhaseSteps() {
   }
 }
 
+static uint32_t phaseFromDegrees(float degrees) {
+  while (degrees < 0.0f) degrees += 360.0f;
+  while (degrees >= 360.0f) degrees -= 360.0f;
+  return (uint32_t)((degrees / 360.0f) * 4294967296.0f);
+}
+
 // ------------------------- SAMPLE GENERATION --------------------------
 
 static int32_t generateChannelSample(uint8_t chIndex) {
@@ -218,13 +231,14 @@ static int32_t generateChannelSample(uint8_t chIndex) {
 
     case SIGNAL_SINE: {
       ch.phase += ch.phaseStep;
-      const float radians = ((float)ch.phase / 4294967296.0f) * TWO_PI;
+      uint32_t phaseWithOffset = ch.phase + phaseFromDegrees(ch.phaseOffsetDeg);
+      const float radians = ((float)phaseWithOffset / 4294967296.0f) * TWO_PI;
       return clamp24((int64_t)(sinf(radians) * (float)amp) + ch.offset);
     }
 
     case SIGNAL_TRIANGLE: {
       ch.phase += ch.phaseStep;
-      uint32_t p = ch.phase;
+      uint32_t p = ch.phase + phaseFromDegrees(ch.phaseOffsetDeg);
       int32_t tri = (p < 0x80000000u)
                       ? (int32_t)(p >> 7) - 0x800000
                       : 0x7FFFFF - (int32_t)((p - 0x80000000u) >> 7);
@@ -437,15 +451,26 @@ static void serviceSpi() {
 // -------------------------- RUNTIME CONTROL ---------------------------
 
 static void initializeChannels(SignalMode mode) {
+  const float voltagePhaseDeg[4] = {0.0f, -120.0f, 120.0f, 0.0f};
+  const float currentPhaseDeg[4] = {
+    -DEFAULT_POWER_FACTOR_LAG_DEG,
+    -120.0f - DEFAULT_POWER_FACTOR_LAG_DEG,
+    120.0f - DEFAULT_POWER_FACTOR_LAG_DEG,
+    0.0f
+  };
+
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
     channels[ch].mode = mode;
-    channels[ch].constantValue = DEFAULT_CONSTANT * (ch + 1);
-    channels[ch].sineFreqHz = DEFAULT_SINE_FREQ_HZ * (1.0f + 0.05f * ch);
-    channels[ch].amplitude = DEFAULT_AMPLITUDE;
+    channels[ch].constantValue = ch == 7 ? 0 : DEFAULT_CONSTANT * (ch + 1);
+    channels[ch].sineFreqHz = DEFAULT_SINE_FREQ_HZ;
+    channels[ch].amplitude = ch < 4 ? DEFAULT_AMPLITUDE : DEFAULT_CURRENT_AMPLITUDE;
+    channels[ch].phaseOffsetDeg = ch < 4 ? voltagePhaseDeg[ch] : currentPhaseDeg[ch - 4];
     channels[ch].offset = DEFAULT_OFFSET;
-    channels[ch].phase = (uint32_t)ch * 0x11111111u;
+    channels[ch].phase = 0;
     channels[ch].counter = 0;
   }
+  channels[7].mode = SIGNAL_CONSTANT; // balanced three-phase neutral current is nominally zero
+  channels[7].amplitude = 0.0f;
   updateChannelPhaseSteps();
 }
 
@@ -488,6 +513,10 @@ static bool setSignal(SignalMode mode) {
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
     channels[ch].mode = mode;
   }
+  if (mode == SIGNAL_SINE) {
+    channels[7].mode = SIGNAL_CONSTANT;
+    channels[7].constantValue = 0;
+  }
   return true;
 }
 
@@ -507,9 +536,11 @@ static void printConfig() {
   Serial.print(F("DRDY_MODE=")); Serial.println(DRDY_PULSE_MODE ? F("PULSE") : F("LEVEL"));
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
     Serial.print(F("CH")); Serial.print(ch);
+    Serial.print(F(" ")); Serial.print(CHANNEL_NAMES[ch]);
     Serial.print(F("=")); Serial.print(signalName(channels[ch].mode));
     Serial.print(F(" freq=")); Serial.print(channels[ch].sineFreqHz, 2);
     Serial.print(F(" amp=")); Serial.print(channels[ch].amplitude, 3);
+    Serial.print(F(" phase_deg=")); Serial.print(channels[ch].phaseOffsetDeg, 1);
     Serial.print(F(" offset=")); Serial.print(channels[ch].offset);
     Serial.print(F(" const=")); Serial.println(channels[ch].constantValue);
   }

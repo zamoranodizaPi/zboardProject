@@ -112,7 +112,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="field"><label>Modo</label><select id="mode"><option>SINE</option><option>COUNTER</option><option>TRIANGLE</option><option>RANDOM</option><option>CONSTANT</option></select></div>
         <button class="primary" onclick="applyConfig()">Aplicar</button>
         <button class="stop" onclick="sendCommand('STOP')">STOP</button>
-        <div class="field"><label>Canal</label><select id="channel"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option></select></div>
+        <div class="field"><label>Canal</label><select id="channel"></select></div>
         <div class="field"><label>Modo canal</label><select id="chMode"><option>SINE</option><option>COUNTER</option><option>TRIANGLE</option><option>RANDOM</option><option>CONSTANT</option></select></div>
         <div class="field"><label>Valor/Freq</label><input id="chValue" value="60"></div>
         <button onclick="applyChannel()">CH</button>
@@ -123,6 +123,7 @@ INDEX_HTML = r"""<!doctype html>
   </main>
   <script>
     const colors = ["#64a6ff","#42c587","#e3ba4f","#ef6a63","#55d4d8","#d083ff","#f58b4c","#a4d66d"];
+    const channelNames = ["VA", "VB", "VC", "VAN", "IA", "IB", "IC", "IN"];
     let enabled = new Array(8).fill(true);
     let last = null;
 
@@ -131,9 +132,20 @@ INDEX_HTML = r"""<!doctype html>
       root.innerHTML = "";
       for (let i = 0; i < 8; i++) {
         const label = document.createElement("label");
-        label.innerHTML = `<input type="checkbox" checked onchange="enabled[${i}]=this.checked"><span class="swatch" style="--c:${colors[i]}"></span>CH${i}`;
+        label.innerHTML = `<input type="checkbox" checked onchange="enabled[${i}]=this.checked"><span class="swatch" style="--c:${colors[i]}"></span>${channelNames[i]}`;
         root.appendChild(label);
       }
+    }
+
+    function makeChannelSelect() {
+      const select = document.getElementById("channel");
+      select.innerHTML = "";
+      channelNames.forEach((name, index) => {
+        const option = document.createElement("option");
+        option.value = index;
+        option.textContent = `${index} - ${name}`;
+        select.appendChild(option);
+      });
     }
 
     function fmt(n, digits=0) {
@@ -209,6 +221,7 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
     makeLegend();
+    makeChannelSelect();
     setInterval(poll, 150);
     poll();
   </script>

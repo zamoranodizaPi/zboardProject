@@ -69,6 +69,24 @@ STOP
 CONFIG
 ```
 
+## Mapa de señales por defecto
+
+El perfil inicial emula un sistema trifasico balanceado de 60 Hz:
+
+| Canal | Señal | Fase |
+|---:|---|---:|
+| CH0 | VA | 0 deg |
+| CH1 | VB | -120 deg |
+| CH2 | VC | +120 deg |
+| CH3 | VAN | 0 deg |
+| CH4 | IA | -30 deg |
+| CH5 | IB | -150 deg |
+| CH6 | IC | +90 deg |
+| CH7 | IN | 0, neutro balanceado |
+
+Las corrientes usan menor amplitud que los voltajes y retrasan 30 grados,
+equivalente a un factor de potencia inductivo aproximado de 0.866.
+
 ## Notas de rendimiento
 
 Python en Raspberry Pi puede graficar y medir bien a tasas moderadas. A 16 kSPS o 32 kSPS,
