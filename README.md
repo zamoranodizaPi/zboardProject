@@ -127,6 +127,8 @@ demo/
   esp32_angle_sim/   firmware PlatformIO/Arduino para simular angulo, Hall y cruce por cero
   raspi_monitor/     monitor Python para configurar, visualizar y guardar telemetria
   raspi_web/         dashboard web local para configuracion y medicion
+  esp32_ads131m08_virtual/  ADC virtual SPI tipo ADS131M08
+  raspi_ads_scope/          scope web para frames SPI del ADC virtual
 ```
 
 El demo tambien incluye un modelo ADS131M08 virtual de 8 canales para generar `VA/VB/VC`, `IA/IB/IC`, `VDC`, `TEMP` y codigos crudos `adc0..adc7`. Ver `demo/README.md` para el flujo de prueba.

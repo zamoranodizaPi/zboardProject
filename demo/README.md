@@ -13,6 +13,8 @@ Raspberry Pi 5  <--- USB serial --->  ESP32
 - `esp32_angle_sim/`: firmware PlatformIO/Arduino para simular angulo electrico, cruce por cero, Hall y estados.
 - `raspi_monitor/`: herramienta Python para configurar el ESP32, visualizar telemetria y guardar CSV.
 - `raspi_web/`: dashboard web local para configurar y medir desde el navegador.
+- `esp32_ads131m08_virtual/`: ESP32 como ADC virtual por SPI, parecido al ADS131M08.
+- `raspi_ads_scope/`: scope web que lee frames SPI binarios del ADC virtual.
 
 ## Flujo recomendado
 
