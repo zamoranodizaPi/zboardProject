@@ -25,21 +25,22 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-El scope intenta configurar el ESP32 por USB serial antes de abrir SPI:
+El scope configura el ESP32 por SPI/MOSI en cada lectura. Si tambien existe USB serial,
+manda los mismos parametros por serial como respaldo:
 
 ```text
 ENABLE 1
 FAULT 0
-LINEHZ 60
+LINEHZ <line-hz>
 FS <sample-rate>
-ANGLE 90
-GATEDEG 15
+ANGLE <angle-deg>
+GATEDEG <gate-deg>
 ```
 
 ## Ejecutar
 
 ```bash
-python ads_scope.py --spi-bus 0 --spi-device 0 --sample-rate 3000 --http-port 8090
+python ads_scope.py --spi-bus 0 --spi-device 0 --sample-rate 800 --line-hz 10 --http-port 8090
 ```
 
 Abrir:

@@ -10,6 +10,8 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr int32_t kAdcPositiveFullScale = 8388607;
 constexpr size_t kFrameBytes = 32;
+constexpr uint8_t kCommandSync0 = 0xC3;
+constexpr uint8_t kCommandSync1 = 0x3C;
 
 constexpr int kPinMiso = 19;
 constexpr int kPinMosi = 23;
@@ -19,8 +21,8 @@ constexpr int kPinDrdy = 4;
 
 bool enabled = true;
 bool fault = false;
-float lineFrequencyHz = 60.0f;
-float sampleRateHz = 3000.0f;
+float lineFrequencyHz = 10.0f;
+float sampleRateHz = 800.0f;
 float angleSetpointDeg = 90.0f;
 float gateWidthDeg = 15.0f;
 float voltagePeak = 170.0f;
@@ -79,6 +81,27 @@ uint16_t checksum16(const uint8_t *buffer, size_t length) {
     sum = static_cast<uint16_t>(sum + buffer[i]);
   }
   return sum;
+}
+
+uint16_t readU16(const uint8_t *buffer, size_t offset) {
+  return (static_cast<uint16_t>(buffer[offset]) << 8) | buffer[offset + 1];
+}
+
+void applyCommandFrame(const uint8_t *buffer) {
+  if (buffer[0] != kCommandSync0 || buffer[1] != kCommandSync1) return;
+  if (checksum16(buffer, 30) != readU16(buffer, 30)) return;
+
+  const uint8_t flags = buffer[2];
+  enabled = (flags & 0x01) != 0;
+  fault = (flags & 0x02) != 0;
+  sampleRateHz = clampFloat(static_cast<float>(readU16(buffer, 4)), 500.0f, 20000.0f);
+  lineFrequencyHz = clampFloat(static_cast<float>(readU16(buffer, 6)) / 100.0f, 0.1f, 400.0f);
+  angleSetpointDeg = clampFloat(static_cast<float>(readU16(buffer, 8)) / 100.0f, 0.0f, 180.0f);
+  gateWidthDeg = clampFloat(static_cast<float>(readU16(buffer, 10)) / 100.0f, 1.0f, 45.0f);
+  voltagePeak = clampFloat(static_cast<float>(readU16(buffer, 12)) / 10.0f, 0.0f, 240.0f);
+  currentPeak = clampFloat(static_cast<float>(readU16(buffer, 14)) / 100.0f, 0.0f, 24.0f);
+  dcBusVolts = clampFloat(static_cast<float>(readU16(buffer, 16)) / 10.0f, 0.0f, 480.0f);
+  measurementNoise = clampFloat(static_cast<float>(readU16(buffer, 18)) / 100000.0f, 0.0f, 0.05f);
 }
 
 void updateModel() {
@@ -268,6 +291,9 @@ void loop() {
 
   const esp_err_t err = spi_slave_transmit(VSPI_HOST, &transaction, pdMS_TO_TICKS(100));
   digitalWrite(kPinDrdy, HIGH);
+  if (err == ESP_OK) {
+    applyCommandFrame(rxFrame);
+  }
   if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
     Serial.print(F("ERR spi_slave_transmit "));
     Serial.println(static_cast<int>(err));

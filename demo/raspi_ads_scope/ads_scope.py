@@ -17,6 +17,7 @@ import serial
 
 FRAME_BYTES = 32
 SYNC = (0xA5, 0x5A)
+COMMAND_SYNC = (0xC3, 0x3C)
 ADC_FS = 8388607.0
 
 
@@ -54,7 +55,8 @@ INDEX_HTML = r"""<!doctype html>
     <section>
       <h2>Measurements</h2>
       <div class="metrics">
-        <div class="metric"><span>Sample Rate</span><strong id="fs">--</strong></div>
+        <div class="metric"><span>Target Rate</span><strong id="fs">--</strong></div>
+        <div class="metric"><span>Actual Rate</span><strong id="actualfs">--</strong></div>
         <div class="metric"><span>Frames</span><strong id="frames">--</strong></div>
         <div class="metric"><span>Dropped</span><strong id="dropped">--</strong></div>
         <div class="metric"><span>Status</span><strong id="status">--</strong></div>
@@ -123,6 +125,7 @@ INDEX_HTML = r"""<!doctype html>
         document.getElementById("dot").className = data.connected ? "dot ok" : "dot";
         document.getElementById("state").textContent = data.connected ? "SPI online" : (data.error || "Waiting");
         document.getElementById("fs").textContent = `${data.sample_rate} S/s`;
+        document.getElementById("actualfs").textContent = `${fmt(data.actual_sample_rate, 0)} S/s`;
         document.getElementById("frames").textContent = data.frames;
         document.getElementById("dropped").textContent = data.dropped;
         document.getElementById("status").textContent = data.status_hex;
@@ -157,13 +160,41 @@ def checksum16(frame: List[int]) -> int:
     return sum(frame[:30]) & 0xFFFF
 
 
+def put_u16(frame: List[int], offset: int, value: int) -> None:
+    value = max(0, min(0xFFFF, int(value)))
+    frame[offset] = (value >> 8) & 0xFF
+    frame[offset + 1] = value & 0xFF
+
+
 class AdsReader:
-    def __init__(self, bus: int, device: int, sample_rate: int, spi_hz: int, history: int) -> None:
+    def __init__(
+        self,
+        bus: int,
+        device: int,
+        sample_rate: int,
+        spi_hz: int,
+        history: int,
+        line_hz: float,
+        angle_deg: float,
+        gate_deg: float,
+        voltage_peak: float,
+        current_peak: float,
+        dc_bus: float,
+        noise: float,
+    ) -> None:
         self.bus = bus
         self.device = device
         self.sample_rate = sample_rate
         self.spi_hz = spi_hz
+        self.line_hz = line_hz
+        self.angle_deg = angle_deg
+        self.gate_deg = gate_deg
+        self.voltage_peak = voltage_peak
+        self.current_peak = current_peak
+        self.dc_bus = dc_bus
+        self.noise = noise
         self.samples: Deque[Dict[str, float]] = deque(maxlen=history)
+        self.rate_times: Deque[float] = deque(maxlen=512)
         self.lock = threading.Lock()
         self.frames = 0
         self.dropped = 0
@@ -191,6 +222,7 @@ class AdsReader:
             return {
                 "connected": self.last_seen > 0.0 and age is not None and age < 1.0 and not self.error,
                 "sample_rate": self.sample_rate,
+                "actual_sample_rate": self._actual_rate_locked(),
                 "frames": self.frames,
                 "dropped": self.dropped,
                 "status": self.status,
@@ -198,6 +230,12 @@ class AdsReader:
                 "error": self.error,
                 "samples": list(self.samples),
             }
+
+    def _actual_rate_locked(self) -> float:
+        if len(self.rate_times) < 2:
+            return 0.0
+        elapsed = self.rate_times[-1] - self.rate_times[0]
+        return 0.0 if elapsed <= 0 else (len(self.rate_times) - 1) / elapsed
 
     def _decode(self, frame: List[int]) -> Dict[str, float] | None:
         if len(frame) != FRAME_BYTES or tuple(frame[:2]) != SYNC:
@@ -223,14 +261,16 @@ class AdsReader:
     def _loop(self) -> None:
         period = 1.0 / self.sample_rate
         next_time = time.perf_counter()
-        dummy = [0] * FRAME_BYTES
+        command = self._build_command_frame()
         while not self.stop_event.is_set():
             try:
-                frame = self.spi.xfer2(dummy)
+                frame = self.spi.xfer2(command)
                 decoded = self._decode(frame)
                 if decoded is not None:
+                    now = time.perf_counter()
                     with self.lock:
                         self.samples.append(decoded)
+                        self.rate_times.append(now)
                         self.frames += 1
                         self.last_seen = time.time()
                         self.error = ""
@@ -244,6 +284,21 @@ class AdsReader:
                 time.sleep(sleep_time)
             else:
                 next_time = time.perf_counter()
+
+    def _build_command_frame(self) -> List[int]:
+        frame = [0] * FRAME_BYTES
+        frame[0], frame[1] = COMMAND_SYNC
+        frame[2] = 0x01
+        put_u16(frame, 4, self.sample_rate)
+        put_u16(frame, 6, round(self.line_hz * 100.0))
+        put_u16(frame, 8, round(self.angle_deg * 100.0))
+        put_u16(frame, 10, round(self.gate_deg * 100.0))
+        put_u16(frame, 12, round(self.voltage_peak * 10.0))
+        put_u16(frame, 14, round(self.current_peak * 100.0))
+        put_u16(frame, 16, round(self.dc_bus * 10.0))
+        put_u16(frame, 18, round(self.noise * 100000.0))
+        put_u16(frame, 30, checksum16(frame))
+        return frame
 
 
 def make_handler(reader: AdsReader):
@@ -270,7 +325,7 @@ def make_handler(reader: AdsReader):
     return Handler
 
 
-def configure_virtual_adc(sample_rate: int) -> None:
+def configure_virtual_adc(sample_rate: int, line_hz: float, angle_deg: float, gate_deg: float) -> None:
     ports = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
     if not ports:
         return
@@ -281,10 +336,10 @@ def configure_virtual_adc(sample_rate: int) -> None:
                 for command in (
                     "ENABLE 1",
                     "FAULT 0",
-                    "LINEHZ 60",
+                    f"LINEHZ {line_hz}",
                     f"FS {sample_rate}",
-                    "ANGLE 90",
-                    "GATEDEG 15",
+                    f"ANGLE {angle_deg}",
+                    f"GATEDEG {gate_deg}",
                     "STATUS",
                 ):
                     port.write((command + "\n").encode("ascii"))
@@ -299,15 +354,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="ADS131M08 virtual SPI scope.")
     parser.add_argument("--spi-bus", type=int, default=0)
     parser.add_argument("--spi-device", type=int, default=0)
-    parser.add_argument("--sample-rate", type=int, default=3000)
+    parser.add_argument("--sample-rate", type=int, default=800)
+    parser.add_argument("--line-hz", type=float, default=10.0)
+    parser.add_argument("--angle-deg", type=float, default=90.0)
+    parser.add_argument("--gate-deg", type=float, default=15.0)
+    parser.add_argument("--voltage-peak", type=float, default=170.0)
+    parser.add_argument("--current-peak", type=float, default=10.0)
+    parser.add_argument("--dc-bus", type=float, default=325.0)
+    parser.add_argument("--noise", type=float, default=0.001)
     parser.add_argument("--spi-hz", type=int, default=1000000)
     parser.add_argument("--history", type=int, default=600)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--http-port", type=int, default=8090)
     args = parser.parse_args()
 
-    configure_virtual_adc(args.sample_rate)
-    reader = AdsReader(args.spi_bus, args.spi_device, args.sample_rate, args.spi_hz, args.history)
+    configure_virtual_adc(args.sample_rate, args.line_hz, args.angle_deg, args.gate_deg)
+    reader = AdsReader(
+        args.spi_bus,
+        args.spi_device,
+        args.sample_rate,
+        args.spi_hz,
+        args.history,
+        args.line_hz,
+        args.angle_deg,
+        args.gate_deg,
+        args.voltage_peak,
+        args.current_peak,
+        args.dc_bus,
+        args.noise,
+    )
     reader.start()
     server = ThreadingHTTPServer((args.host, args.http_port), make_handler(reader))
     print(f"Serving http://{args.host}:{args.http_port} SPI{args.spi_bus}.{args.spi_device} {args.sample_rate}S/s", flush=True)
