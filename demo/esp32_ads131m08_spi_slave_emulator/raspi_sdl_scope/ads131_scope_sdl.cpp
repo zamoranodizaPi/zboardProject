@@ -885,10 +885,10 @@ void drawTraceLayer(SDL_Renderer *r, const Args &args, ScopeState *state, const 
 }
 
 void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
-            const DisplayFrame &previous, RenderCache *cache, double render_fps) {
+            const DisplayFrame &previous, RenderCache *cache, double render_fps, bool redraw_overlay) {
   int w = 0, h = 0;
   SDL_GetRendererOutputSize(r, &w, &h);
-  fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
+  if (redraw_overlay) fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
 
   const int panel_w = state->panel_open.load() ? 250 : 0;
   SDL_Rect plot{70, 74, w - 100 - panel_w, h - 150};
@@ -903,9 +903,11 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
     drawText(r, plot.x + 12, plot.y + 10, "VOLTAGE", {112, 132, 136, 150}, 2);
     drawText(r, plot.x + 12, plot.y + plot.h / 2 + 18, "CURRENT", {112, 132, 136, 150}, 2);
   }
-  drawTopBar(r, args, state, frame, render_fps, w);
-  drawSidePanel(r, args, state, SDL_Rect{w - panel_w + 8, 74, std::max(0, panel_w - 18), h - 150});
-  drawBottomBar(r, args, state, frame, w, h);
+  if (redraw_overlay) {
+    drawTopBar(r, args, state, frame, render_fps, w);
+    drawSidePanel(r, args, state, SDL_Rect{w - panel_w + 8, 74, std::max(0, panel_w - 18), h - 150});
+    drawBottomBar(r, args, state, frame, w, h);
+  }
 }
 
 struct InteractionState {
@@ -1018,6 +1020,8 @@ void renderThread(const Args args, ScopeState *state,
   double render_fps = 0.0;
   RenderCache cache;
   InteractionState interaction;
+  bool force_overlay = true;
+  auto last_overlay = std::chrono::steady_clock::now() - std::chrono::seconds(1);
   while (state->running.load()) {
     SDL_Event event;
     int front = state->front_display.load(std::memory_order_acquire);
@@ -1025,8 +1029,17 @@ void renderThread(const Args args, ScopeState *state,
     while (SDL_PollEvent(&event)) {
       if (event.type == SDL_QUIT) state->running = false;
       handleEvent(event, state, args, &interaction, (*display)[front]);
+      force_overlay = true;
     }
-    drawUi(renderer, args, state, (*display)[front], (*display)[previous], &cache, render_fps);
+    auto overlay_now = std::chrono::steady_clock::now();
+    bool redraw_overlay =
+        force_overlay || std::chrono::duration<double>(overlay_now - last_overlay).count() > 0.25;
+    drawUi(renderer, args, state, (*display)[front], (*display)[previous], &cache, render_fps,
+           redraw_overlay);
+    if (redraw_overlay) {
+      last_overlay = overlay_now;
+      force_overlay = false;
+    }
     SDL_RenderPresent(renderer);
 
     frames++;
