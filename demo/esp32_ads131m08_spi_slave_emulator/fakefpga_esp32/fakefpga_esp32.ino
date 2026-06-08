@@ -36,9 +36,9 @@ static const uint8_t NUM_CHANNELS = 8;
 static const uint8_t WORD_BYTES = 3;
 static const uint16_t FRAME_BYTES = (1 + NUM_CHANNELS) * WORD_BYTES;
 static const uint32_t SPI_HZ = 10000000;
-static const uint32_t NOMINAL_SAMPLE_RATE = 4000;
+static const uint32_t NOMINAL_SAMPLE_RATE = 8000;
 static const uint32_t TELEMETRY_MS = 100;
-static const uint32_t MIN_ADS_READ_INTERVAL_US = 245;
+static const uint32_t MIN_ADS_READ_INTERVAL_US = 112;
 static const uint32_t SYNC_PULSE_US = 800;
 static const uint32_t FIELD_PWM_HZ = 20000;
 static const uint8_t FIELD_PWM_BITS = 10;
@@ -90,6 +90,9 @@ static float manualFieldDuty = 0.35f;
 static float prevVa = 0.0f;
 static uint32_t lastVaCrossUs = 0;
 static uint32_t lastAdsReadUs = 0;
+static volatile uint16_t drdyPending = 0;
+static volatile uint32_t drdyEvents = 0;
+static volatile uint32_t drdyDrops = 0;
 static uint32_t lastTelemetryMs = 0;
 static uint32_t lastStatsMs = 0;
 static uint32_t syncPulseReleaseUs = 0;
@@ -101,6 +104,15 @@ static float fps = 0.0f;
 
 static char serialLine[96];
 static uint8_t serialLineLen = 0;
+
+static void IRAM_ATTR onAdsDrdyFalling() {
+  if (drdyPending < 64) {
+    drdyPending++;
+  } else {
+    drdyDrops++;
+  }
+  drdyEvents++;
+}
 
 // ----------------------------- HELPERS --------------------------------
 
@@ -166,7 +178,17 @@ static bool readAdsFrame() {
 }
 
 static void sampleAdsIfReady() {
-  if (!running || digitalRead(PIN_ADS_DRDY) == HIGH) return;
+  if (!running) return;
+
+  bool hasPending = false;
+  noInterrupts();
+  if (drdyPending > 0) {
+    drdyPending--;
+    hasPending = true;
+  }
+  interrupts();
+
+  if (!hasPending) return;
 
   const uint32_t nowReadUs = micros();
   if ((uint32_t)(nowReadUs - lastAdsReadUs) < MIN_ADS_READ_INTERVAL_US) return;
@@ -261,6 +283,9 @@ static void printTelemetry() {
   Serial.print(F("FPGA seq=")); Serial.print(framesRead);
   Serial.print(F(" fps=")); Serial.print(fps, 1);
   Serial.print(F(" bad=")); Serial.print(badFrames);
+  Serial.print(F(" drdy=")); Serial.print((uint32_t)drdyEvents);
+  Serial.print(F(" drops=")); Serial.print((uint32_t)drdyDrops);
+  Serial.print(F(" pend=")); Serial.print((uint32_t)drdyPending);
   Serial.print(F(" f=")); Serial.print(meas.freq_hz, 3);
   Serial.print(F(" va=")); Serial.print(meas.va_rms, 4);
   Serial.print(F(" vb=")); Serial.print(meas.vb_rms, 4);
@@ -283,6 +308,7 @@ static void printTelemetry() {
 static void printConfig() {
   Serial.println(F("FakeFPGA ESP32"));
   Serial.print(F("ADS_SPI_HZ=")); Serial.println(SPI_HZ);
+  Serial.print(F("NOMINAL_SAMPLE_RATE=")); Serial.println(NOMINAL_SAMPLE_RATE);
   Serial.print(F("FRAME_BYTES=")); Serial.println(FRAME_BYTES);
   Serial.print(F("DRDY_PIN=")); Serial.println(PIN_ADS_DRDY);
   Serial.print(F("MOTOR_RUN_PIN=")); Serial.println(PIN_MOTOR_RUN);
@@ -356,6 +382,7 @@ void setup() {
 
   configureFieldPwm();
   adsSpi.begin(PIN_ADS_SCLK, PIN_ADS_MISO, PIN_ADS_MOSI, PIN_ADS_CS);
+  attachInterrupt(digitalPinToInterrupt(PIN_ADS_DRDY), onAdsDrdyFalling, FALLING);
 
   lastStatsMs = millis();
   lastTelemetryMs = millis();
