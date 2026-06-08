@@ -51,7 +51,7 @@ constexpr std::array<Color, kMaxChannels> kTraceColors = {{
 struct Args {
   std::string spi_dev = "/dev/spidev0.0";
   std::string serial_dev;
-  uint32_t spi_hz = 10000000;
+  uint32_t spi_hz = 5000000;
   uint8_t spi_mode = 0;
   int word_bits = 24;
   int channels = 8;
@@ -135,11 +135,24 @@ bool decodeFrame(const std::vector<uint8_t> &rx, const Args &args, Sample &out) 
     if (crc16Ccitt(rx, payload_len) != got) return false;
   }
   out.status = readWord(rx, 0, args.word_bits);
+  if (args.word_bits == 24 && (out.status & 0xFF0000u) != 0x050000u) return false;
+  if (args.word_bits == 16 && (out.status & 0xFF00u) != 0x0500u) return false;
+  if (args.word_bits == 32 && (out.status & 0xFF000000u) != 0x05000000u) return false;
   for (int ch = 0; ch < args.channels; ++ch) {
     int32_t raw = decodeSignedWord(rx, static_cast<size_t>(ch + 1) * word_bytes, args.word_bits);
     out.ch[ch] = std::clamp(static_cast<float>(raw / kAdc24FullScale), -1.0f, 1.0f);
   }
   return true;
+}
+
+void rejectSpikes(Sample &sample, const Sample &last, int channels) {
+  if (last.seq == 0) return;
+  for (int ch = 0; ch < channels; ++ch) {
+    const float delta = std::fabs(sample.ch[ch] - last.ch[ch]);
+    if (delta > 0.35f) {
+      sample.ch[ch] = last.ch[ch];
+    }
+  }
 }
 
 std::string autoSerialPort() {
@@ -277,6 +290,8 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       static_cast<size_t>(1 + args.channels + (args.crc ? 1 : 0)) * (args.word_bits / 8);
   std::vector<uint8_t> tx(frame_bytes, 0), rx(frame_bytes, 0);
   int drdy = openDrdyGpio(args.drdy_gpio);
+  Sample last_good;
+  bool have_last_good = false;
   auto next = std::chrono::steady_clock::now();
 
   while (state->running.load(std::memory_order_relaxed)) {
@@ -295,9 +310,12 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
 
     Sample sample;
     if (spiTransfer(spi, args.spi_hz, tx, rx) && decodeFrame(rx, args, sample)) {
+      if (have_last_good) rejectSpikes(sample, last_good, args.channels);
       uint64_t seq = state->write_seq.fetch_add(1, std::memory_order_acq_rel);
       sample.seq = seq;
       (*ring)[seq & (kRingSize - 1)] = sample;
+      last_good = sample;
+      have_last_good = true;
       state->frames.fetch_add(1, std::memory_order_relaxed);
     } else {
       state->errors.fetch_add(1, std::memory_order_relaxed);

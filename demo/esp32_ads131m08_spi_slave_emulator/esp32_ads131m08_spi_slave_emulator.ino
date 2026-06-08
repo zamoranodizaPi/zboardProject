@@ -62,8 +62,8 @@ static const int PIN_SPI_MISO = 19;
 
 static const int DRDY_PIN = 4;
 static const bool DRDY_ACTIVE_LOW = true;
-static const bool DRDY_PULSE_MODE = true;     // false = level held until a frame is sent
-static const uint32_t DRDY_PULSE_US = 8;
+static const bool DRDY_PULSE_MODE = false;    // false = level held until a frame is sent
+static const uint32_t DRDY_PULSE_US = 80;
 
 static const uint8_t NUM_CHANNELS = 8;
 static const uint8_t SPI_QUEUE_DEPTH = 4;

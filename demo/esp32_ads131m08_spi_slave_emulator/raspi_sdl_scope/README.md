@@ -9,6 +9,7 @@ No usa navegador, Electron, Python, Qt ni servidor web.
 ## Arquitectura
 
 - Thread 1: adquisicion SPI por `/dev/spidev0.0`, sincronizada con DRDY GPIO4.
+- Validacion de `STATUS_WORD` y rechazo suave de spikes para ocultar frames corruptos.
 - Thread 2: procesamiento, ventana temporal y trigger edge.
 - Thread 3: render SDL2 fullscreen a 60 FPS con double buffering del renderer.
 - Ring buffer prealocado de 65536 muestras.
@@ -130,4 +131,6 @@ los dispositivos `/dev/spidev0.0` y `/dev/ttyUSB0`.
 - El renderer usa SDL accelerated + present vsync.
 - La pantalla se limpia completamente por defecto para evitar trazos acumulados.
 - El efecto phosphor se puede activar explicitamente con `--phosphor`.
+- Para mejor estabilidad, el ESP32 usa DRDY en modo nivel: activo hasta que termina
+  la transaccion SPI.
 - Si quieres latencia minima, usa modo Lite sin escritorio y `SDL_VIDEODRIVER=kmsdrm`.
