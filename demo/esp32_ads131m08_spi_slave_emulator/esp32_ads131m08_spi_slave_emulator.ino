@@ -366,22 +366,17 @@ static void IRAM_ATTR onSampleTimer() {
 }
 
 static void configureSampleTimer() {
-  if (sampleTimer) {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-    timerEnd(sampleTimer);
-#else
-    timerEnd(sampleTimer);
-#endif
-    sampleTimer = nullptr;
+  if (!sampleTimer) {
+    sampleTimer = timerBegin(TIMER_BASE_HZ);
+    timerAttachInterrupt(sampleTimer, &onSampleTimer);
   }
-
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  sampleTimer = timerBegin(TIMER_BASE_HZ);
-  timerAttachInterrupt(sampleTimer, &onSampleTimer);
   timerAlarm(sampleTimer, TIMER_BASE_HZ / SAMPLE_RATE, true, 0);
 #else
-  sampleTimer = timerBegin(0, 10, true); // 8 MHz on 80 MHz APB
-  timerAttachInterrupt(sampleTimer, &onSampleTimer, true);
+  if (!sampleTimer) {
+    sampleTimer = timerBegin(0, 10, true); // 8 MHz on 80 MHz APB
+    timerAttachInterrupt(sampleTimer, &onSampleTimer, true);
+  }
   timerAlarmWrite(sampleTimer, TIMER_BASE_HZ / SAMPLE_RATE, true);
   timerAlarmEnable(sampleTimer);
 #endif
