@@ -1,6 +1,7 @@
 #include <SDL2/SDL.h>
 #include <fcntl.h>
 #include <linux/spi/spidev.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/ioctl.h>
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -54,9 +56,10 @@ struct Args {
   int word_bits = 24;
   int channels = 8;
   int sample_rate = 4000;
+  int drdy_gpio = 4;
   bool crc = false;
   bool fullscreen = true;
-  bool phosphor = true;
+  bool phosphor = false;
 };
 
 struct Sample {
@@ -218,6 +221,44 @@ bool spiTransfer(int fd, uint32_t hz, const std::vector<uint8_t> &tx, std::vecto
   return ioctl(fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
 }
 
+bool writeTextFile(const std::string &path, const std::string &value) {
+  int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  bool ok = ::write(fd, value.data(), value.size()) == static_cast<ssize_t>(value.size());
+  ::close(fd);
+  return ok;
+}
+
+int openDrdyGpio(int gpio) {
+  if (gpio < 0) return -1;
+  const std::string base = "/sys/class/gpio/gpio" + std::to_string(gpio);
+  if (!std::filesystem::exists(base + "/value")) {
+    writeTextFile("/sys/class/gpio/export", std::to_string(gpio));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  writeTextFile(base + "/direction", "in");
+  writeTextFile(base + "/edge", "falling");
+  int fd = ::open((base + "/value").c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) return -1;
+  char c;
+  ::lseek(fd, 0, SEEK_SET);
+  ::read(fd, &c, 1);
+  return fd;
+}
+
+bool waitForDrdy(int fd, int timeout_ms) {
+  if (fd < 0) return false;
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = POLLPRI | POLLERR;
+  int rc = ::poll(&pfd, 1, timeout_ms);
+  if (rc <= 0) return false;
+  char c;
+  ::lseek(fd, 0, SEEK_SET);
+  ::read(fd, &c, 1);
+  return true;
+}
+
 void pinThreadToCpu(int cpu) {
   cpu_set_t set;
   CPU_ZERO(&set);
@@ -235,6 +276,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
   const size_t frame_bytes =
       static_cast<size_t>(1 + args.channels + (args.crc ? 1 : 0)) * (args.word_bits / 8);
   std::vector<uint8_t> tx(frame_bytes, 0), rx(frame_bytes, 0);
+  int drdy = openDrdyGpio(args.drdy_gpio);
   auto next = std::chrono::steady_clock::now();
 
   while (state->running.load(std::memory_order_relaxed)) {
@@ -242,6 +284,13 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
       next = std::chrono::steady_clock::now();
       continue;
+    }
+
+    if (drdy >= 0) {
+      if (!waitForDrdy(drdy, 100)) {
+        state->overruns.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
     }
 
     Sample sample;
@@ -254,13 +303,16 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       state->errors.fetch_add(1, std::memory_order_relaxed);
     }
 
-    next += std::chrono::microseconds(1000000 / std::max(1, args.sample_rate));
-    std::this_thread::sleep_until(next);
-    if (std::chrono::steady_clock::now() > next + std::chrono::milliseconds(50)) {
-      state->overruns.fetch_add(1, std::memory_order_relaxed);
-      next = std::chrono::steady_clock::now();
+    if (drdy < 0) {
+      next += std::chrono::microseconds(1000000 / std::max(1, args.sample_rate));
+      std::this_thread::sleep_until(next);
+      if (std::chrono::steady_clock::now() > next + std::chrono::milliseconds(50)) {
+        state->overruns.fetch_add(1, std::memory_order_relaxed);
+        next = std::chrono::steady_clock::now();
+      }
     }
   }
+  if (drdy >= 0) ::close(drdy);
   ::close(spi);
 }
 
@@ -328,8 +380,55 @@ void line(SDL_Renderer *r, float x1, float y1, float x2, float y2) {
   SDL_RenderDrawLineF(r, x1, y1, x2, y2);
 }
 
+std::array<uint8_t, 7> glyphRows(char ch) {
+  switch (ch) {
+    case 'A': return {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    case 'B': return {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E};
+    case 'C': return {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E};
+    case 'D': return {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E};
+    case 'E': return {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F};
+    case 'F': return {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10};
+    case 'G': return {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E};
+    case 'H': return {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    case 'I': return {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E};
+    case 'J': return {0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C};
+    case 'K': return {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
+    case 'L': return {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
+    case 'M': return {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
+    case 'N': return {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
+    case 'O': return {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    case 'P': return {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+    case 'Q': return {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D};
+    case 'R': return {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
+    case 'S': return {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
+    case 'T': return {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+    case 'U': return {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    case 'V': return {0x11, 0x11, 0x11, 0x11, 0x0A, 0x0A, 0x04};
+    case 'W': return {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11};
+    case 'X': return {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
+    case 'Y': return {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+    case 'Z': return {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F};
+    case '0': return {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
+    case '1': return {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E};
+    case '2': return {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
+    case '3': return {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E};
+    case '4': return {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02};
+    case '5': return {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E};
+    case '6': return {0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E};
+    case '7': return {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
+    case '8': return {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E};
+    case '9': return {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E};
+    case '.': return {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C};
+    case '/': return {0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10};
+    case '-': return {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00};
+    case '+': return {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00};
+    case ':': return {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00};
+    case '\'': return {0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00};
+    default: return {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  }
+}
+
 void drawText(SDL_Renderer *r, int x, int y, const std::string &text, Color color, int scale = 2) {
-  // Small blocky 5x7 placeholder font: draw ASCII as short bars for instrument labels.
   setColor(r, color);
   int cx = x;
   for (char ch : text) {
@@ -337,10 +436,10 @@ void drawText(SDL_Renderer *r, int x, int y, const std::string &text, Color colo
       cx += 4 * scale;
       continue;
     }
-    uint8_t bits = static_cast<uint8_t>(ch);
+    auto rows = glyphRows(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
     for (int row = 0; row < 7; ++row) {
       for (int col = 0; col < 5; ++col) {
-        if ((bits + row * 17 + col * 11) & (1u << ((row + col) & 3))) {
+        if (rows[row] & (1u << (4 - col))) {
           SDL_Rect rect{cx + col * scale, y + row * scale, scale, scale};
           SDL_RenderFillRect(r, &rect);
         }
@@ -510,7 +609,8 @@ void usage(const char *argv0) {
   std::cerr << "Usage: " << argv0
             << " [--spi-dev /dev/spidev0.0] [--serial /dev/ttyUSB0]"
             << " [--spi-hz 10000000] [--spi-mode 0] [--bits 24]"
-            << " [--rate 4000] [--channels 8] [--windowed] [--no-phosphor]\n";
+            << " [--rate 4000] [--channels 8] [--drdy-gpio 4]"
+            << " [--no-drdy] [--windowed] [--phosphor]\n";
 }
 
 bool parseArgs(int argc, char **argv, Args &args) {
@@ -551,10 +651,18 @@ bool parseArgs(int argc, char **argv, Args &args) {
       const char *v = need("--channels");
       if (!v) return false;
       args.channels = std::clamp(std::atoi(v), 1, kMaxChannels);
+    } else if (a == "--drdy-gpio") {
+      const char *v = need("--drdy-gpio");
+      if (!v) return false;
+      args.drdy_gpio = std::atoi(v);
+    } else if (a == "--no-drdy") {
+      args.drdy_gpio = -1;
     } else if (a == "--crc") {
       args.crc = true;
     } else if (a == "--windowed") {
       args.fullscreen = false;
+    } else if (a == "--phosphor") {
+      args.phosphor = true;
     } else if (a == "--no-phosphor") {
       args.phosphor = false;
     } else if (a == "--help" || a == "-h") {

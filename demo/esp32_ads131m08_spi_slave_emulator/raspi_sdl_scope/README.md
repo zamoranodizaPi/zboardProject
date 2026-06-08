@@ -8,7 +8,7 @@ No usa navegador, Electron, Python, Qt ni servidor web.
 
 ## Arquitectura
 
-- Thread 1: adquisicion SPI por `/dev/spidev0.0`.
+- Thread 1: adquisicion SPI por `/dev/spidev0.0`, sincronizada con DRDY GPIO4.
 - Thread 2: procesamiento, ventana temporal y trigger edge.
 - Thread 3: render SDL2 fullscreen a 60 FPS con double buffering del renderer.
 - Ring buffer prealocado de 65536 muestras.
@@ -81,10 +81,11 @@ Desde una consola local de la Raspberry:
 SDL_VIDEODRIVER=kmsdrm SDL_AUDIODRIVER=dummy ./ads131_scope_sdl \
   --spi-dev /dev/spidev0.0 \
   --serial /dev/ttyUSB0 \
-  --spi-hz 10000000 \
+  --spi-hz 5000000 \
   --bits 24 \
   --rate 4000 \
-  --channels 8
+  --channels 8 \
+  --drdy-gpio 4
 ```
 
 Para probar dentro de un escritorio:
@@ -127,6 +128,6 @@ los dispositivos `/dev/spidev0.0` y `/dev/ttyUSB0`.
 
 - No se reserva memoria en el loop principal de adquisicion.
 - El renderer usa SDL accelerated + present vsync.
-- El efecto phosphor usa un clear semitransparente, se puede desactivar con
-  `--no-phosphor`.
+- La pantalla se limpia completamente por defecto para evitar trazos acumulados.
+- El efecto phosphor se puede activar explicitamente con `--phosphor`.
 - Si quieres latencia minima, usa modo Lite sin escritorio y `SDL_VIDEODRIVER=kmsdrm`.
