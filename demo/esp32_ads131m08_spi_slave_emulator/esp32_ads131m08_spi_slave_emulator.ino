@@ -68,6 +68,7 @@ static const uint32_t DRDY_PULSE_US = 80;
 
 static const uint8_t NUM_CHANNELS = 8;
 static const uint8_t SPI_QUEUE_DEPTH = 1;
+static const uint8_t FRAME_QUEUE_DEPTH = 16;
 static const uint8_t MAX_WORD_BYTES = 4;
 static const uint8_t MAX_FRAME_WORDS = NUM_CHANNELS + 2; // status + 8 channels + crc
 static const uint16_t MAX_FRAME_BYTES = MAX_FRAME_WORDS * MAX_WORD_BYTES;
@@ -116,10 +117,12 @@ struct ChannelConfig {
 struct RuntimeStats {
   volatile uint32_t sampleTicks;
   volatile uint32_t overruns;
+  volatile uint32_t pendingSamples;
+  volatile uint32_t queuedFrames;
+  volatile uint32_t droppedSamples;
   volatile uint32_t framesSent;
   volatile uint32_t spiFrames;
   volatile bool running;
-  volatile bool sampleDue;
   volatile bool drdyAsserted;
   uint32_t lastStatsMs;
   uint32_t lastFramesSent;
@@ -135,8 +138,11 @@ struct RuntimeStats {
 static ChannelConfig channels[NUM_CHANNELS];
 static RuntimeStats stats;
 
-static uint8_t currentFrame[MAX_FRAME_BYTES];
-static volatile uint16_t currentFrameBytes = 0;
+DMA_ATTR static uint8_t frameQueue[FRAME_QUEUE_DEPTH][MAX_FRAME_BYTES];
+static uint16_t frameQueueBytes[FRAME_QUEUE_DEPTH];
+static uint8_t frameHead = 0;
+static uint8_t frameTail = 0;
+static uint8_t frameCount = 0;
 static volatile uint32_t frameSequence = 0;
 static volatile uint32_t drdyReleaseAtUs = 0;
 
@@ -287,10 +293,10 @@ static void packWord(uint8_t *dst, int32_t sample24) {
   }
 }
 
-static void buildFrame() {
+static uint16_t buildFrame(uint8_t *frame) {
   const uint32_t startUs = micros();
   const uint8_t bytes = wordBytes();
-  uint8_t *p = currentFrame;
+  uint8_t *p = frame;
   uint32_t seq = frameSequence++;
 
   int32_t status = (int32_t)(0x050000 | (seq & 0xFFFF)); // recognizable status marker + sequence
@@ -303,15 +309,44 @@ static void buildFrame() {
   }
 
   if (ENABLE_CRC) {
-    const uint16_t payloadLen = (uint16_t)(p - currentFrame);
-    uint16_t crc = crc16Ccitt(currentFrame, payloadLen);
+    const uint16_t payloadLen = (uint16_t)(p - frame);
+    uint16_t crc = crc16Ccitt(frame, payloadLen);
     int32_t crcWord = (int32_t)crc;
     packWord(p, crcWord);
     p += bytes;
   }
 
-  currentFrameBytes = (uint16_t)(p - currentFrame);
   stats.buildMicrosAccum += micros() - startUs;
+  return (uint16_t)(p - frame);
+}
+
+static void resetFrameQueue() {
+  frameHead = 0;
+  frameTail = 0;
+  frameCount = 0;
+  stats.queuedFrames = 0;
+}
+
+static bool enqueueFrame() {
+  if (frameCount >= FRAME_QUEUE_DEPTH) {
+    stats.overruns++;
+    stats.droppedSamples++;
+    return false;
+  }
+
+  const uint8_t slot = frameTail;
+  frameQueueBytes[slot] = buildFrame(frameQueue[slot]);
+  frameTail = (uint8_t)((frameTail + 1) % FRAME_QUEUE_DEPTH);
+  frameCount++;
+  stats.queuedFrames = frameCount;
+  return true;
+}
+
+static void popFrameQueue() {
+  if (frameCount == 0) return;
+  frameHead = (uint8_t)((frameHead + 1) % FRAME_QUEUE_DEPTH);
+  frameCount--;
+  stats.queuedFrames = frameCount;
 }
 
 // ----------------------------- DRDY -----------------------------------
@@ -319,11 +354,13 @@ static void buildFrame() {
 static void IRAM_ATTR onSampleTimer() {
   portENTER_CRITICAL_ISR(&timerMux);
   if (stats.running) {
-    if (stats.sampleDue || stats.drdyAsserted || spiTransactionInFlight) {
-      stats.overruns++;
-    }
     stats.sampleTicks++;
-    stats.sampleDue = true;
+    if (stats.pendingSamples < FRAME_QUEUE_DEPTH) {
+      stats.pendingSamples++;
+    } else {
+      stats.overruns++;
+      stats.droppedSamples++;
+    }
   }
   portEXIT_CRITICAL_ISR(&timerMux);
 }
@@ -374,9 +411,11 @@ static void freeSpi() {
 }
 
 static void prepareSpiBuffer(uint8_t index) {
+  const uint8_t slot = frameHead;
+  const uint16_t bytes = frameQueueBytes[slot];
   memset(&spiTransactions[index], 0, sizeof(spiTransactions[index]));
-  memcpy(txBuffers[index], currentFrame, currentFrameBytes);
-  spiTransactions[index].length = (size_t)currentFrameBytes * 8;
+  memcpy(txBuffers[index], frameQueue[slot], bytes);
+  spiTransactions[index].length = (size_t)bytes * 8;
   spiTransactions[index].tx_buffer = txBuffers[index];
   spiTransactions[index].rx_buffer = rxBuffers[index];
 }
@@ -437,8 +476,11 @@ static void initializeChannels(SignalMode mode) {
 }
 
 static void startStreaming() {
+  resetFrameQueue();
+  portENTER_CRITICAL(&timerMux);
+  stats.pendingSamples = 1;
   stats.running = true;
-  stats.sampleDue = true;
+  portEXIT_CRITICAL(&timerMux);
   stats.drdyAsserted = false;
   digitalWrite(DRDY_PIN, drdyInactiveLevel());
   Serial.println(F("Streaming START"));
@@ -450,13 +492,19 @@ static void syncPhaseToVaZeroCrossing() {
     channels[ch].counter = 0;
   }
   frameSequence = 0;
-  stats.sampleDue = true;
+  resetFrameQueue();
+  portENTER_CRITICAL(&timerMux);
+  stats.pendingSamples = 1;
+  portEXIT_CRITICAL(&timerMux);
   Serial.println(F("SYNC VA zero-cross"));
 }
 
 static void stopStreaming() {
+  portENTER_CRITICAL(&timerMux);
   stats.running = false;
-  stats.sampleDue = false;
+  stats.pendingSamples = 0;
+  portEXIT_CRITICAL(&timerMux);
+  resetFrameQueue();
   stats.drdyAsserted = false;
   spiTransactionInFlight = false;
   digitalWrite(DRDY_PIN, drdyInactiveLevel());
@@ -466,7 +514,7 @@ static void stopStreaming() {
 static bool setBits(uint8_t bits) {
   if (bits != 16 && bits != 24 && bits != 32) return false;
   WORD_LENGTH = bits;
-  currentFrameBytes = frameBytes();
+  resetFrameQueue();
   return startSpi();
 }
 
@@ -475,6 +523,10 @@ static bool setSampleRate(uint32_t rate) {
   if (rate == SAMPLE_RATE) return true;
   SAMPLE_RATE = rate;
   updateChannelPhaseSteps();
+  resetFrameQueue();
+  portENTER_CRITICAL(&timerMux);
+  stats.pendingSamples = stats.running ? 1 : 0;
+  portEXIT_CRITICAL(&timerMux);
   configureSampleTimer();
   return true;
 }
@@ -509,6 +561,7 @@ static void printConfig() {
   Serial.print(F("ENABLE_CRC=")); Serial.println(ENABLE_CRC ? F("true") : F("false"));
   Serial.print(F("AUTO_PRINT_STATS=")); Serial.println(AUTO_PRINT_STATS ? F("true") : F("false"));
   Serial.print(F("FRAME_BYTES=")); Serial.println(frameBytes());
+  Serial.print(F("FRAME_QUEUE_DEPTH=")); Serial.println(FRAME_QUEUE_DEPTH);
   Serial.print(F("DRDY_PIN=")); Serial.println(DRDY_PIN);
   Serial.print(F("DRDY_MODE=")); Serial.println(DRDY_PULSE_MODE ? F("PULSE") : F("LEVEL"));
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
@@ -529,6 +582,9 @@ static void printStats() {
   Serial.print(F(" frames_sent=")); Serial.print((uint32_t)stats.framesSent);
   Serial.print(F(" spi_done=")); Serial.print((uint32_t)stats.spiFrames);
   Serial.print(F(" sample_ticks=")); Serial.print((uint32_t)stats.sampleTicks);
+  Serial.print(F(" pending=")); Serial.print((uint32_t)stats.pendingSamples);
+  Serial.print(F(" queue=")); Serial.print((uint32_t)stats.queuedFrames);
+  Serial.print(F(" dropped=")); Serial.print((uint32_t)stats.droppedSamples);
   Serial.print(F(" overruns=")); Serial.print((uint32_t)stats.overruns);
   Serial.print(F(" cpu_build_pct=")); Serial.print(stats.cpuPct, 2);
   Serial.print(F(" running=")); Serial.println(stats.running ? F("true") : F("false"));
@@ -583,9 +639,11 @@ static void handleCommand(char *line) {
     char *arg = strtok(nullptr, " \t\r\n");
     if (arg && (!strcasecmp(arg, "ON") || !strcasecmp(arg, "TRUE") || !strcmp(arg, "1"))) {
       ENABLE_CRC = true;
+      resetFrameQueue();
       Serial.println(startSpi() ? F("OK") : F("ERR SPI restart failed"));
     } else if (arg && (!strcasecmp(arg, "OFF") || !strcasecmp(arg, "FALSE") || !strcmp(arg, "0"))) {
       ENABLE_CRC = false;
+      resetFrameQueue();
       Serial.println(startSpi() ? F("OK") : F("ERR SPI restart failed"));
     } else {
       Serial.println(F("ERR CRC expects ON or OFF"));
@@ -668,7 +726,7 @@ void setup() {
   digitalWrite(DRDY_PIN, drdyInactiveLevel());
 
   initializeChannels(SIGNAL_SINE);
-  currentFrameBytes = frameBytes();
+  resetFrameQueue();
   stats.lastStatsMs = millis();
 
   configureSampleTimer();
@@ -684,11 +742,28 @@ void loop() {
   serviceSerial();
   serviceDrdyPulse();
 
-  if (stats.sampleDue && !stats.drdyAsserted && !spiTransactionInFlight) {
+  while (stats.pendingSamples > 0 && frameCount < FRAME_QUEUE_DEPTH) {
+    bool tookSampleTick = false;
     portENTER_CRITICAL(&timerMux);
-    stats.sampleDue = false;
+    if (stats.pendingSamples > 0) {
+      stats.pendingSamples--;
+      tookSampleTick = true;
+    }
     portEXIT_CRITICAL(&timerMux);
-    buildFrame();
+
+    if (!tookSampleTick) break;
+    enqueueFrame();
+  }
+
+  if (stats.pendingSamples > 0 && frameCount >= FRAME_QUEUE_DEPTH) {
+    portENTER_CRITICAL(&timerMux);
+    stats.droppedSamples += stats.pendingSamples;
+    stats.overruns += stats.pendingSamples;
+    stats.pendingSamples = 0;
+    portEXIT_CRITICAL(&timerMux);
+  }
+
+  if (frameCount > 0 && !stats.drdyAsserted && !spiTransactionInFlight) {
     prepareSpiBuffer(0);
     spiTransactionInFlight = true;
     stats.drdyAsserted = true;
@@ -708,6 +783,7 @@ void loop() {
     } else {
       stats.overruns++;
     }
+    popFrameQueue();
   }
 
   updateStats();
