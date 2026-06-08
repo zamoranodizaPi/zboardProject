@@ -30,6 +30,8 @@ constexpr int kMaxChannels = 8;
 constexpr int kDisplayBuffers = 2;
 constexpr size_t kRingSize = 1u << 16;
 constexpr double kAdc24FullScale = 8388607.0;
+constexpr float kLineHz = 60.0f;
+constexpr float kVisibleCycles = 6.0f;
 constexpr std::array<const char *, kMaxChannels> kNames = {
     "VA", "VB", "VC", "VAN", "IA", "IB", "IC", "IN"};
 
@@ -81,7 +83,7 @@ struct ScopeState {
   std::atomic<bool> trigger_auto{true};
   std::atomic<float> trigger_level{0.0f};
   std::atomic<float> volts_per_div{0.25f};
-  std::atomic<float> time_per_div{0.010f};  // 10 ms/div = 6 cycles at 60 Hz over 10 div
+  std::atomic<float> time_per_div{kVisibleCycles / kLineHz / 10.0f};
   std::atomic<bool> show_channel[kMaxChannels];
 };
 
@@ -302,11 +304,17 @@ int openDrdyGpio(int gpio) {
   return fd;
 }
 
-bool waitForDrdy(int fd, int timeout_ms) {
-  if (fd < 0) return false;
+int readGpioValue(int fd) {
+  if (fd < 0) return -1;
   char c;
   ::lseek(fd, 0, SEEK_SET);
-  if (::read(fd, &c, 1) == 1 && c == '0') {
+  if (::read(fd, &c, 1) != 1) return -1;
+  return c == '0' ? 0 : 1;
+}
+
+bool waitForDrdyActive(int fd, int timeout_ms) {
+  if (fd < 0) return false;
+  if (readGpioValue(fd) == 0) {
     return true;
   }
   pollfd pfd{};
@@ -314,9 +322,17 @@ bool waitForDrdy(int fd, int timeout_ms) {
   pfd.events = POLLPRI | POLLERR;
   int rc = ::poll(&pfd, 1, timeout_ms);
   if (rc <= 0) return false;
-  ::lseek(fd, 0, SEEK_SET);
-  ::read(fd, &c, 1);
-  return true;
+  return readGpioValue(fd) == 0;
+}
+
+bool waitForDrdyInactive(int fd, int timeout_us) {
+  if (fd < 0) return false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (readGpioValue(fd) == 1) return true;
+    std::this_thread::sleep_for(std::chrono::microseconds(20));
+  }
+  return readGpioValue(fd) == 1;
 }
 
 void pinThreadToCpu(int cpu) {
@@ -350,7 +366,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
     }
 
     if (drdy >= 0) {
-      if (!waitForDrdy(drdy, 100)) {
+      if (!waitForDrdyActive(drdy, 100)) {
         state->overruns.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
@@ -369,7 +385,9 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       state->errors.fetch_add(1, std::memory_order_relaxed);
     }
 
-    if (drdy < 0) {
+    if (drdy >= 0) {
+      waitForDrdyInactive(drdy, 2000);
+    } else {
       next += std::chrono::microseconds(1000000 / std::max(1, args.sample_rate));
       std::this_thread::sleep_until(next);
       if (std::chrono::steady_clock::now() > next + std::chrono::milliseconds(50)) {
@@ -580,7 +598,7 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   std::string status = state->capture.load() ? "RUN" : "HOLD";
   std::string trig = frame.triggered ? "TRIG'D" : (state->trigger_auto.load() ? "AUTO" : "WAIT");
   char line1[256];
-  std::snprintf(line1, sizeof(line1), "%s   %s   Fs %dS/s   %.3f ms/div   %.2f V/div   FPS %.0f",
+  std::snprintf(line1, sizeof(line1), "%s   %s   6CYC   Fs %dS/s   %.3f ms/div   %.2f V/div   FPS %.0f",
                 status.c_str(), trig.c_str(), args.sample_rate,
                 state->time_per_div.load() * 1000.0f, state->volts_per_div.load(), render_fps);
   drawText(r, 18, 14, line1, state->capture.load() ? green : amber, 2);
