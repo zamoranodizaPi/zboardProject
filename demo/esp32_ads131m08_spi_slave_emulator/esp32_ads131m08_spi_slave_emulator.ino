@@ -67,7 +67,7 @@ static const bool DRDY_PULSE_MODE = false;    // false = level held until a fram
 static const uint32_t DRDY_PULSE_US = 80;
 
 static const uint8_t NUM_CHANNELS = 8;
-static const uint8_t SPI_QUEUE_DEPTH = 1;
+static const uint8_t SPI_QUEUE_DEPTH = 4;
 static const uint8_t MAX_WORD_BYTES = 4;
 static const uint8_t MAX_FRAME_WORDS = NUM_CHANNELS + 2; // status + 8 channels + crc
 static const uint16_t MAX_FRAME_BYTES = MAX_FRAME_WORDS * MAX_WORD_BYTES;
@@ -144,7 +144,6 @@ DMA_ATTR static uint8_t txBuffers[SPI_QUEUE_DEPTH][MAX_FRAME_BYTES];
 DMA_ATTR static uint8_t rxBuffers[SPI_QUEUE_DEPTH][MAX_FRAME_BYTES];
 static spi_slave_transaction_t spiTransactions[SPI_QUEUE_DEPTH];
 static bool spiStarted = false;
-static volatile bool spiTransactionInFlight = false;
 
 static char serialLine[96];
 static uint8_t serialLineLen = 0;
@@ -319,7 +318,7 @@ static void buildFrame() {
 static void IRAM_ATTR onSampleTimer() {
   portENTER_CRITICAL_ISR(&timerMux);
   if (stats.running) {
-    if (stats.sampleDue || stats.drdyAsserted || spiTransactionInFlight) {
+    if (stats.sampleDue || stats.drdyAsserted) {
       stats.overruns++;
     }
     stats.sampleTicks++;
@@ -388,11 +387,13 @@ static bool queueSpiBuffer(uint8_t index) {
   spiTransactions[index].length = (size_t)currentFrameBytes * 8;
   spiTransactions[index].tx_buffer = txBuffers[index];
   spiTransactions[index].rx_buffer = rxBuffers[index];
-  esp_err_t err = spi_slave_queue_trans(SPI_SLAVE_HOST, &spiTransactions[index], 0);
-  if (err == ESP_OK) {
-    spiTransactionInFlight = true;
+  return spi_slave_queue_trans(SPI_SLAVE_HOST, &spiTransactions[index], 0) == ESP_OK;
+}
+
+static void refreshQueuedTxBuffers() {
+  for (uint8_t i = 0; i < SPI_QUEUE_DEPTH; i++) {
+    memcpy(txBuffers[i], currentFrame, currentFrameBytes);
   }
-  return err == ESP_OK;
 }
 
 static bool startSpi() {
@@ -420,7 +421,15 @@ static bool startSpi() {
     return false;
   }
 
-  spiTransactionInFlight = false;
+  buildFrame();
+  for (uint8_t i = 0; i < SPI_QUEUE_DEPTH; i++) {
+    if (!queueSpiBuffer(i)) {
+      Serial.println(F("SPI queue failed"));
+      freeSpi();
+      return false;
+    }
+  }
+
   spiStarted = true;
   return true;
 }
@@ -433,7 +442,7 @@ static void serviceSpi() {
     stats.spiFrames++;
     for (uint8_t i = 0; i < SPI_QUEUE_DEPTH; i++) {
       if (done == &spiTransactions[i]) {
-        spiTransactionInFlight = false;
+        queueSpiBuffer(i);
         break;
       }
     }
@@ -699,19 +708,16 @@ void loop() {
   serviceDrdyPulse();
   serviceSpi();
 
-  if (stats.sampleDue && !stats.drdyAsserted && !spiTransactionInFlight) {
+  if (stats.sampleDue && !stats.drdyAsserted) {
     portENTER_CRITICAL(&timerMux);
     stats.sampleDue = false;
     portEXIT_CRITICAL(&timerMux);
     buildFrame();
-    if (queueSpiBuffer(0)) {
-      stats.drdyAsserted = true;
-      gpio_set_level((gpio_num_t)DRDY_PIN, drdyActiveLevel());
-      if (DRDY_PULSE_MODE) {
-        drdyReleaseAtUs = micros() + DRDY_PULSE_US;
-      }
-    } else {
-      stats.overruns++;
+    refreshQueuedTxBuffers();
+    stats.drdyAsserted = true;
+    gpio_set_level((gpio_num_t)DRDY_PIN, drdyActiveLevel());
+    if (DRDY_PULSE_MODE) {
+      drdyReleaseAtUs = micros() + DRDY_PULSE_US;
     }
   }
 
