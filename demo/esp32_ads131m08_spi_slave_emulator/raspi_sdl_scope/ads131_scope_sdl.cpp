@@ -28,9 +28,11 @@ namespace {
 
 constexpr int kMaxChannels = 8;
 constexpr int kDisplayBuffers = 2;
+constexpr int kLogicalWidth = 1280;
+constexpr int kLogicalHeight = 720;
 constexpr size_t kRingSize = 1u << 16;
 constexpr size_t kMaxRenderPoints = 8192;
-constexpr size_t kTargetTracePoints = 240;
+constexpr size_t kTargetTracePoints = 320;
 constexpr double kAdc24FullScale = 8388607.0;
 constexpr float kLineHz = 60.0f;
 constexpr float kVisibleCycles = 6.0f;
@@ -888,8 +890,7 @@ void drawTraceLayer(SDL_Renderer *r, const Args &args, ScopeState *state, const 
 
 void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
             const DisplayFrame &previous, RenderCache *cache, double render_fps, bool redraw_overlay) {
-  int w = 0, h = 0;
-  SDL_GetRendererOutputSize(r, &w, &h);
+  int w = kLogicalWidth, h = kLogicalHeight;
   if (redraw_overlay) fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
 
   const int panel_w = state->panel_open.load() ? 250 : 0;
@@ -1017,6 +1018,7 @@ void renderThread(const Args args, ScopeState *state,
     return;
   }
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+  SDL_RenderSetLogicalSize(renderer, kLogicalWidth, kLogicalHeight);
 
   auto last = std::chrono::steady_clock::now();
   int frames = 0;
