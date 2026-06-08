@@ -691,7 +691,6 @@ bool measureCh1Fft(const DisplayFrame &frame, int sample_rate, Measurements *m) 
   }
 
   const float fundamental_bin = static_cast<float>(peak_bin) + interp;
-  m->freq = fundamental_bin * bin_hz;
 
   double harmonic_power = 0.0;
   for (int h = 2; h <= 10; ++h) {
@@ -714,7 +713,8 @@ Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_r
   float min_v = 1.0f, max_v = -1.0f;
   double sum_sq = 0.0;
   int rising_crossings = 0;
-  size_t first_cross = 0, last_cross = 0;
+  double first_cross = 0.0;
+  double last_cross = 0.0;
   const float level = 0.0f;
 
   for (size_t i = 0; i < frame.count; ++i) {
@@ -725,8 +725,11 @@ Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_r
     if (i > 0) {
       const float a = frame.samples[i - 1].ch[channel];
       if (a < level && v >= level) {
-        if (rising_crossings == 0) first_cross = i;
-        last_cross = i;
+        const float dv = v - a;
+        const double frac = std::fabs(dv) > 1.0e-9f ? (level - a) / dv : 0.0;
+        const double cross = static_cast<double>(i - 1) + std::clamp(frac, 0.0, 1.0);
+        if (rising_crossings == 0) first_cross = cross;
+        last_cross = cross;
         rising_crossings++;
       }
     }
@@ -742,7 +745,20 @@ Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_r
   }
   m.phase = 0.0f;
   m.thd = 0.0f;
-  if (channel == 0) measureCh1Fft(frame, sample_rate, &m);
+  if (channel == 0) {
+    measureCh1Fft(frame, sample_rate, &m);
+    static thread_local float smoothed_freq = 0.0f;
+    static thread_local bool have_smoothed_freq = false;
+    if (m.freq >= 30.0f && m.freq <= 500.0f) {
+      if (!have_smoothed_freq || std::fabs(m.freq - smoothed_freq) > 10.0f) {
+        smoothed_freq = m.freq;
+        have_smoothed_freq = true;
+      } else {
+        smoothed_freq = smoothed_freq * 0.85f + m.freq * 0.15f;
+      }
+      m.freq = smoothed_freq;
+    }
+  }
   return m;
 }
 
@@ -1219,7 +1235,7 @@ void drawBottomBar(SDL_Renderer *r, const Args &args, ScopeState *state,
     const char *unit;
   };
   const Readout readouts[] = {
-      {ch == 0 ? "FFT" : "FREQ", m.freq, "HZ"}, {"RMS", m.rms, ""},   {"VPP", m.vpp, ""},
+      {"FREQ", m.freq, "HZ"}, {"RMS", m.rms, ""},   {"VPP", m.vpp, ""},
       {"PEAK", m.peak, ""},   {"PHASE", m.phase, ""}, {"THD", m.thd, ""},
   };
   int x = 138;
