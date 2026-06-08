@@ -31,7 +31,9 @@ constexpr int kMaxChannels = 8;
 constexpr int kDisplayBuffers = 2;
 constexpr size_t kRingSize = 1u << 16;
 constexpr size_t kMaxRenderPoints = 8192;
+constexpr size_t kFftSize = 1024;
 constexpr double kAdc24FullScale = 8388607.0;
+constexpr float kPi = 3.14159265358979323846f;
 constexpr float kLineHz = 60.0f;
 constexpr float kVisibleCycles = 6.0f;
 constexpr float kTraceUseHeight = 0.66f;
@@ -596,6 +598,115 @@ uint64_t findTriggeredSeq(const Args &args, ScopeState *state, const std::vector
   return scan_end;
 }
 
+void fftRadix2(std::array<float, kFftSize> &real, std::array<float, kFftSize> &imag) {
+  size_t j = 0;
+  for (size_t i = 1; i < kFftSize; ++i) {
+    size_t bit = kFftSize >> 1;
+    while (j & bit) {
+      j ^= bit;
+      bit >>= 1;
+    }
+    j ^= bit;
+    if (i < j) {
+      std::swap(real[i], real[j]);
+      std::swap(imag[i], imag[j]);
+    }
+  }
+
+  for (size_t len = 2; len <= kFftSize; len <<= 1) {
+    const float angle = -2.0f * kPi / static_cast<float>(len);
+    const float wlen_r = std::cos(angle);
+    const float wlen_i = std::sin(angle);
+    for (size_t i = 0; i < kFftSize; i += len) {
+      float wr = 1.0f;
+      float wi = 0.0f;
+      for (size_t k = 0; k < len / 2; ++k) {
+        const size_t even = i + k;
+        const size_t odd = even + len / 2;
+        const float ur = real[even];
+        const float ui = imag[even];
+        const float vr = real[odd] * wr - imag[odd] * wi;
+        const float vi = real[odd] * wi + imag[odd] * wr;
+        real[even] = ur + vr;
+        imag[even] = ui + vi;
+        real[odd] = ur - vr;
+        imag[odd] = ui - vi;
+        const float next_wr = wr * wlen_r - wi * wlen_i;
+        wi = wr * wlen_i + wi * wlen_r;
+        wr = next_wr;
+      }
+    }
+  }
+}
+
+bool measureCh1Fft(const DisplayFrame &frame, int sample_rate, Measurements *m) {
+  if (frame.count < 64 || sample_rate <= 0) return false;
+
+  static thread_local std::array<float, kFftSize> real{};
+  static thread_local std::array<float, kFftSize> imag{};
+  static thread_local std::array<float, kFftSize / 2> mag{};
+
+  const size_t n = std::min(frame.count, kFftSize);
+  double mean = 0.0;
+  for (size_t i = 0; i < n; ++i) mean += frame.samples[i].ch[0];
+  mean /= static_cast<double>(n);
+
+  for (size_t i = 0; i < kFftSize; ++i) {
+    real[i] = 0.0f;
+    imag[i] = 0.0f;
+  }
+
+  for (size_t i = 0; i < n; ++i) {
+    const float window = 0.5f - 0.5f * std::cos((2.0f * kPi * static_cast<float>(i)) /
+                                                std::max(1.0f, static_cast<float>(n - 1)));
+    real[i] = static_cast<float>(frame.samples[i].ch[0] - mean) * window;
+  }
+
+  fftRadix2(real, imag);
+
+  const float bin_hz = static_cast<float>(sample_rate) / static_cast<float>(kFftSize);
+  const size_t first_bin = std::max<size_t>(1, static_cast<size_t>(std::ceil(30.0f / bin_hz)));
+  const size_t last_bin = std::min<size_t>(kFftSize / 2 - 2,
+                                           static_cast<size_t>(std::floor(500.0f / bin_hz)));
+  size_t peak_bin = first_bin;
+  float peak_mag = 0.0f;
+  for (size_t bin = 1; bin < kFftSize / 2; ++bin) {
+    mag[bin] = real[bin] * real[bin] + imag[bin] * imag[bin];
+    if (bin >= first_bin && bin <= last_bin && mag[bin] > peak_mag) {
+      peak_mag = mag[bin];
+      peak_bin = bin;
+    }
+  }
+  if (peak_mag <= 1.0e-12f) return false;
+
+  float interp = 0.0f;
+  if (peak_bin > 1 && peak_bin + 1 < kFftSize / 2) {
+    const float left = mag[peak_bin - 1];
+    const float center = mag[peak_bin];
+    const float right = mag[peak_bin + 1];
+    const float denom = left - 2.0f * center + right;
+    if (std::fabs(denom) > 1.0e-20f) {
+      interp = std::clamp(0.5f * (left - right) / denom, -0.5f, 0.5f);
+    }
+  }
+
+  const float fundamental_bin = static_cast<float>(peak_bin) + interp;
+  m->freq = fundamental_bin * bin_hz;
+
+  double harmonic_power = 0.0;
+  for (int h = 2; h <= 10; ++h) {
+    const int hb = static_cast<int>(std::lround(fundamental_bin * static_cast<float>(h)));
+    if (hb <= 1 || hb + 1 >= static_cast<int>(kFftSize / 2)) break;
+    harmonic_power += static_cast<double>(mag[hb - 1] + mag[hb] + mag[hb + 1]);
+  }
+  const double fundamental_power =
+      static_cast<double>(mag[peak_bin - 1] + mag[peak_bin] + mag[peak_bin + 1]);
+  m->thd = fundamental_power > 1.0e-18
+               ? static_cast<float>(100.0 * std::sqrt(harmonic_power / fundamental_power))
+               : 0.0f;
+  return true;
+}
+
 Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_rate) {
   Measurements m{};
   if (frame.count < 4) return m;
@@ -631,6 +742,7 @@ Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_r
   }
   m.phase = 0.0f;
   m.thd = 0.0f;
+  if (channel == 0) measureCh1Fft(frame, sample_rate, &m);
   return m;
 }
 
@@ -1107,7 +1219,7 @@ void drawBottomBar(SDL_Renderer *r, const Args &args, ScopeState *state,
     const char *unit;
   };
   const Readout readouts[] = {
-      {"FREQ", m.freq, "HZ"}, {"RMS", m.rms, ""},   {"VPP", m.vpp, ""},
+      {ch == 0 ? "FFT" : "FREQ", m.freq, "HZ"}, {"RMS", m.rms, ""},   {"VPP", m.vpp, ""},
       {"PEAK", m.peak, ""},   {"PHASE", m.phase, ""}, {"THD", m.thd, ""},
   };
   int x = 138;
