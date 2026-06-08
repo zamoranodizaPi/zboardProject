@@ -66,6 +66,7 @@ struct Args {
 
 struct Sample {
   uint64_t seq = 0;
+  double t = 0.0;
   uint32_t status = 0;
   std::array<float, kMaxChannels> ch{};
 };
@@ -90,9 +91,16 @@ struct ScopeState {
 struct DisplayFrame {
   size_t count = 0;
   uint64_t end_seq = 0;
+  double start_time = 0.0;
+  double end_time = 0.0;
   bool triggered = false;
   std::vector<Sample> samples;
 };
+
+double steadySeconds() {
+  static const auto t0 = std::chrono::steady_clock::now();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
 
 int32_t signExtend(uint32_t value, int bits) {
   const uint32_t sign = 1u << (bits - 1);
@@ -384,6 +392,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
     if (spiTransfer(spi, args.spi_hz, tx, rx) && decodeFrame(rx, args, sample)) {
       uint64_t seq = state->write_seq.fetch_add(1, std::memory_order_acq_rel);
       sample.seq = seq;
+      sample.t = steadySeconds();
       (*ring)[seq & (kRingSize - 1)] = sample;
       state->frames.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -442,18 +451,30 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
   pinThreadToCpu(2);
   while (state->running.load(std::memory_order_relaxed)) {
     const uint64_t latest = state->write_seq.load(std::memory_order_acquire);
-    const size_t count = samplesPerScreen(args, *state);
-    if (latest > count + 4) {
-      bool triggered = false;
-      uint64_t start = findTriggerStart(args, state, *ring, latest, count, &triggered);
-      if (triggered || state->trigger_auto.load()) {
+    const double total_time = static_cast<double>(state->time_per_div.load()) * 10.0;
+    if (latest > 8) {
+      const uint64_t end_seq = latest - 1;
+      const Sample &end_sample = (*ring)[end_seq & (kRingSize - 1)];
+      if (end_sample.t > 0.0) {
+        const double start_time = end_sample.t - total_time;
+        const size_t max_count = std::min(kRingSize / 2, static_cast<size_t>(args.sample_rate * total_time * 2.5));
+        uint64_t start_seq = end_seq;
+        while (start_seq > 0 && (end_seq - start_seq) < max_count - 1) {
+          const Sample &candidate = (*ring)[start_seq & (kRingSize - 1)];
+          if (candidate.t <= 0.0 || candidate.t < start_time) break;
+          --start_seq;
+        }
+        if ((*ring)[start_seq & (kRingSize - 1)].t < start_time && start_seq < end_seq) ++start_seq;
+        const size_t count = static_cast<size_t>(end_seq - start_seq + 1);
         int back = 1 - state->front_display.load(std::memory_order_acquire);
         DisplayFrame &dst = (*display)[back];
         dst.count = count;
-        dst.end_seq = start + count;
-        dst.triggered = triggered;
+        dst.end_seq = end_seq;
+        dst.start_time = start_time;
+        dst.end_time = end_sample.t;
+        dst.triggered = false;
         for (size_t i = 0; i < count; ++i) {
-          dst.samples[i] = (*ring)[(start + i) & (kRingSize - 1)];
+          dst.samples[i] = (*ring)[(start_seq + i) & (kRingSize - 1)];
         }
         state->front_display.store(back, std::memory_order_release);
       }
@@ -561,15 +582,22 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
   setColor(r, kTraceColors[channel]);
   const float center = area.y + area.h * 0.5f;
   const float scale = (area.h / 8.0f) / std::max(0.02f, vdiv);
-  const float step = static_cast<float>(area.w) / static_cast<float>(frame.count - 1);
-  float last_x = area.x;
-  float last_y = center - frame.samples[0].ch[channel] * scale;
-  for (size_t i = 1; i < frame.count; ++i) {
-    float x = area.x + step * static_cast<float>(i);
+  const double span = std::max(0.001, frame.end_time - frame.start_time);
+  const double max_gap = span / 40.0;
+  bool have_last = false;
+  float last_x = 0.0f;
+  float last_y = 0.0f;
+  double last_t = 0.0;
+  for (size_t i = 0; i < frame.count; ++i) {
+    const Sample &sample = frame.samples[i];
+    if (sample.t < frame.start_time || sample.t > frame.end_time) continue;
+    float x = area.x + static_cast<float>(((sample.t - frame.start_time) / span) * area.w);
     float y = center - frame.samples[i].ch[channel] * scale;
-    line(r, last_x, last_y, x, y);
+    if (have_last && (sample.t - last_t) <= max_gap) line(r, last_x, last_y, x, y);
     last_x = x;
     last_y = y;
+    last_t = sample.t;
+    have_last = true;
   }
 }
 
