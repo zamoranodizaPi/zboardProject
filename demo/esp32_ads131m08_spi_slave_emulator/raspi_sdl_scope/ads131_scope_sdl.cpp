@@ -1029,6 +1029,11 @@ void drawTopBar(SDL_Renderer *r, const Args &args, ScopeState *state, const Disp
   x += 150;
   std::snprintf(buf, sizeof(buf), "FPS %.0f", render_fps);
   drawText(r, x, 18, buf, render_fps >= 55.0 ? green : amber, 2);
+
+  SDL_Rect exit_btn{w - 88, 14, 70, 28};
+  fillRect(r, exit_btn, {72, 18, 18, 245});
+  drawRect(r, exit_btn, {210, 70, 70, 230});
+  drawText(r, exit_btn.x + 13, exit_btn.y + 7, "EXIT", {255, 178, 170, 245}, 2);
 }
 
 void drawSidePanel(SDL_Renderer *r, const Args &args, ScopeState *state, SDL_Rect panel) {
@@ -1250,6 +1255,17 @@ void selectChannel(ScopeState *state, const Args &args, int ch) {
 bool handleTouchButton(int x, int y, ScopeState *state, const Args &args,
                        const DisplayFrame &frame) {
   const int panel_w = state->panel_open.load() ? 250 : 0;
+  int w = 0, h = 0;
+  SDL_Window *window = SDL_GetMouseFocus();
+  if (window) SDL_GetWindowSize(window, &w, &h);
+
+  if (w > 0) {
+    SDL_Rect exit_btn{w - 88, 14, 70, 28};
+    if (pointInRect(x, y, exit_btn)) {
+      state->running = false;
+      return true;
+    }
+  }
 
   SDL_Rect run{18, 14, 78, 28};
   if (pointInRect(x, y, run)) {
@@ -1285,9 +1301,6 @@ bool handleTouchButton(int x, int y, ScopeState *state, const Args &args,
     return true;
   }
 
-  int w = 0, h = 0;
-  SDL_Window *window = SDL_GetMouseFocus();
-  if (window) SDL_GetWindowSize(window, &w, &h);
   if (w <= 0 || h <= 0) return false;
 
   SDL_Rect panel_tab{w - 46, 74, 38, 72};
