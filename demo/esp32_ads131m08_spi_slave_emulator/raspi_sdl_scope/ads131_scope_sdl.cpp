@@ -147,16 +147,6 @@ bool decodeFrame(const std::vector<uint8_t> &rx, const Args &args, Sample &out) 
   return true;
 }
 
-void rejectSpikes(Sample &sample, const Sample &last, int channels) {
-  if (last.seq == 0) return;
-  for (int ch = 0; ch < channels; ++ch) {
-    const float delta = std::fabs(sample.ch[ch] - last.ch[ch]);
-    if (delta > 0.35f) {
-      sample.ch[ch] = last.ch[ch];
-    }
-  }
-}
-
 std::string autoSerialPort() {
   for (const char *prefix : {"/dev/ttyUSB", "/dev/ttyACM"}) {
     for (int i = 0; i < 8; ++i) {
@@ -354,8 +344,6 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
   std::vector<uint8_t> tx(frame_bytes, 0), rx(frame_bytes, 0);
   int drdy = openDrdyGpio(args.drdy_gpio);
   std::cerr << (drdy >= 0 ? "DRDY sync enabled\n" : "DRDY unavailable, timed polling fallback\n");
-  Sample last_good;
-  bool have_last_good = false;
   auto next = std::chrono::steady_clock::now();
 
   while (state->running.load(std::memory_order_relaxed)) {
@@ -374,12 +362,9 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
 
     Sample sample;
     if (spiTransfer(spi, args.spi_hz, tx, rx) && decodeFrame(rx, args, sample)) {
-      if (have_last_good) rejectSpikes(sample, last_good, args.channels);
       uint64_t seq = state->write_seq.fetch_add(1, std::memory_order_acq_rel);
       sample.seq = seq;
       (*ring)[seq & (kRingSize - 1)] = sample;
-      last_good = sample;
-      have_last_good = true;
       state->frames.fetch_add(1, std::memory_order_relaxed);
     } else {
       state->errors.fetch_add(1, std::memory_order_relaxed);
