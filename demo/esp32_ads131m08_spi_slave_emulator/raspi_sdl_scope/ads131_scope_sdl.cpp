@@ -895,7 +895,8 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   fillRect(r, plot, {0, 0, 0, 255});
   drawGrid(r, cache, plot, state->show_grid.load());
 
-  if (state->persistence.load()) drawTraceLayer(r, args, state, previous, plot, 28, 1, false);
+  const bool draw_persistence = state->persistence.load() && (render_fps <= 1.0 || render_fps >= 55.0);
+  if (draw_persistence) drawTraceLayer(r, args, state, previous, plot, 28, 1, false);
   drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
   drawTrigger(r, plot, state);
 
