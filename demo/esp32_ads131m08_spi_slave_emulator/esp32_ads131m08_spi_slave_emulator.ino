@@ -216,7 +216,9 @@ static uint32_t phaseFromTime(float freqHz, float phaseOffsetDeg) {
   const uint32_t elapsedUs = micros() - phaseSyncUs;
   const double cycles = ((double)elapsedUs * (double)freqHz) / 1000000.0;
   const double offset = (double)phaseOffsetDeg / 360.0;
-  return (uint32_t)((cycles + offset) * 4294967296.0);
+  double phase = fmod(cycles + offset, 1.0);
+  if (phase < 0.0) phase += 1.0;
+  return (uint32_t)(phase * 4294967296.0);
 }
 
 // ------------------------- SAMPLE GENERATION --------------------------
