@@ -63,7 +63,8 @@ struct Args {
   int drdy_gpio = 4;
   bool crc = false;
   bool fullscreen = true;
-  bool phosphor = false;
+  bool phosphor = true;
+  bool vsync = false;
 };
 
 struct Sample {
@@ -892,14 +893,7 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
             const DisplayFrame &previous, RenderCache *cache, double render_fps) {
   int w = 0, h = 0;
   SDL_GetRendererOutputSize(r, &w, &h);
-  if (state->persistence.load()) {
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    setColor(r, {0, 0, 0, 58});
-    SDL_Rect full{0, 0, w, h};
-    SDL_RenderFillRect(r, &full);
-  } else {
-    fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
-  }
+  fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
 
   const int panel_w = state->panel_open.load() ? 250 : 0;
   SDL_Rect plot{70, 74, w - 100 - panel_w, h - 150};
@@ -1014,9 +1008,9 @@ void renderThread(const Args args, ScopeState *state,
   if (args.fullscreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
   SDL_Window *window = SDL_CreateWindow("ADS131M08 Instrument Scope", SDL_WINDOWPOS_CENTERED,
                                        SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
-  SDL_Renderer *renderer = SDL_CreateRenderer(
-      window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC |
-                    SDL_RENDERER_TARGETTEXTURE);
+  uint32_t renderer_flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE;
+  if (args.vsync) renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+  SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, renderer_flags);
   if (!window || !renderer) {
     state->running = false;
     SDL_Quit();
@@ -1060,7 +1054,7 @@ void usage(const char *argv0) {
             << " [--spi-dev /dev/spidev0.0] [--serial /dev/ttyUSB0]"
             << " [--spi-hz 10000000] [--spi-mode 0] [--bits 24]"
             << " [--rate 4000] [--channels 8] [--drdy-gpio 4]"
-            << " [--no-drdy] [--windowed] [--phosphor]\n";
+            << " [--no-drdy] [--windowed] [--phosphor] [--vsync]\n";
 }
 
 bool parseArgs(int argc, char **argv, Args &args) {
@@ -1115,6 +1109,10 @@ bool parseArgs(int argc, char **argv, Args &args) {
       args.phosphor = true;
     } else if (a == "--no-phosphor") {
       args.phosphor = false;
+    } else if (a == "--vsync") {
+      args.vsync = true;
+    } else if (a == "--no-vsync") {
+      args.vsync = false;
     } else if (a == "--help" || a == "-h") {
       usage(argv[0]);
       return false;
@@ -1135,6 +1133,7 @@ int main(int argc, char **argv) {
 
   ScopeState state;
   for (int i = 0; i < kMaxChannels; ++i) state.show_channel[i] = i < args.channels;
+  state.persistence = args.phosphor;
 
   int serial = openSerial(args.serial_dev);
   configureEsp32(serial, args);
