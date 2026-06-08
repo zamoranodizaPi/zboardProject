@@ -10,7 +10,7 @@ Group=pi
 WorkingDirectory=/home/pi/zboardProject/demo/esp32_ads131m08_spi_slave_emulator/raspi_sdl_scope
 Environment=SDL_VIDEODRIVER=kmsdrm
 Environment=SDL_AUDIODRIVER=dummy
-ExecStart=/usr/local/bin/ads131_scope_sdl --spi-dev /dev/spidev0.0 --serial /dev/ttyUSB0 --spi-hz 2000000 --bits 24 --rate 4000 --channels 8 --drdy-gpio 4
+ExecStart=/usr/local/bin/ads131_scope_sdl --spi-dev /dev/spidev0.0 --serial /dev/ttyUSB0 --spi-hz 10000000 --bits 24 --rate 4000 --channels 8 --drdy-gpio 4
 Restart=on-failure
 RestartSec=1
 NoNewPrivileges=true

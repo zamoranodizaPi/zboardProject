@@ -56,7 +56,7 @@ constexpr std::array<Color, kMaxChannels> kTraceColors = {{
 struct Args {
   std::string spi_dev = "/dev/spidev0.0";
   std::string serial_dev;
-  uint32_t spi_hz = 2000000;
+  uint32_t spi_hz = 10000000;
   uint8_t spi_mode = 0;
   int word_bits = 24;
   int channels = 8;
