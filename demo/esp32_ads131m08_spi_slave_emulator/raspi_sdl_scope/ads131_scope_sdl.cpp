@@ -443,9 +443,6 @@ bool waitForDrdyLine(DrdyLine *drdy, int timeout_ms) {
   if (!drdy || !drdy->available) return false;
   if (!drdy->using_gpiod) return waitForDrdyActive(drdy->sysfs_fd, timeout_ms);
 
-  const int value = gpiod_line_get_value(drdy->line);
-  if (value == 0) return true;
-
   timespec ts{};
   ts.tv_sec = timeout_ms / 1000;
   ts.tv_nsec = static_cast<long>(timeout_ms % 1000) * 1000000L;
