@@ -38,6 +38,7 @@ static const uint16_t FRAME_BYTES = (1 + NUM_CHANNELS) * WORD_BYTES;
 static const uint32_t SPI_HZ = 10000000;
 static const uint32_t NOMINAL_SAMPLE_RATE = 4000;
 static const uint32_t TELEMETRY_MS = 100;
+static const uint32_t MIN_ADS_READ_INTERVAL_US = 180;
 static const uint32_t SYNC_PULSE_US = 800;
 static const uint32_t FIELD_PWM_HZ = 20000;
 static const uint8_t FIELD_PWM_BITS = 10;
@@ -83,12 +84,12 @@ static Accumulators accum;
 static bool running = true;
 static bool motorRun = false;
 static bool autoField = true;
-static bool drdyArmed = true;
 static bool fault = false;
 static float voltageSetpoint = 0.80f;
 static float manualFieldDuty = 0.35f;
 static float prevVa = 0.0f;
 static uint32_t lastVaCrossUs = 0;
+static uint32_t lastAdsReadUs = 0;
 static uint32_t lastTelemetryMs = 0;
 static uint32_t lastStatsMs = 0;
 static uint32_t syncPulseReleaseUs = 0;
@@ -164,13 +165,11 @@ static bool readAdsFrame() {
 }
 
 static void sampleAdsIfReady() {
-  const int drdy = digitalRead(PIN_ADS_DRDY);
-  if (drdy == HIGH) {
-    drdyArmed = true;
-    return;
-  }
-  if (!drdyArmed || !running) return;
-  drdyArmed = false;
+  if (!running || digitalRead(PIN_ADS_DRDY) == HIGH) return;
+
+  const uint32_t nowReadUs = micros();
+  if ((uint32_t)(nowReadUs - lastAdsReadUs) < MIN_ADS_READ_INTERVAL_US) return;
+  lastAdsReadUs = nowReadUs;
 
   if (!readAdsFrame()) return;
 
