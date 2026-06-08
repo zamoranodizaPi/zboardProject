@@ -118,7 +118,7 @@ struct ScopeState {
   std::atomic<int> trigger_mode{TRIG_AUTO};
   std::atomic<int> trigger_state{TRIG_ARMED};
   std::atomic<float> trigger_level{0.0f};
-  std::atomic<float> trigger_hysteresis{0.02f};
+  std::atomic<float> trigger_hysteresis{0.005f};
   std::atomic<float> trigger_holdoff_ms{60.0f};
   std::atomic<float> volts_per_div{0.25f};
   std::atomic<float> time_per_div{kVisibleCycles / kLineHz / 10.0f};
@@ -488,8 +488,9 @@ uint64_t pretriggerSamples(size_t count) {
 
 bool crossesTrigger(const Sample &a, const Sample &b, int ch, float level, float hysteresis,
                     bool rising) {
-  if (rising) return a.ch[ch] <= level - hysteresis && b.ch[ch] >= level + hysteresis;
-  return a.ch[ch] >= level + hysteresis && b.ch[ch] <= level - hysteresis;
+  const float delta = b.ch[ch] - a.ch[ch];
+  if (rising) return a.ch[ch] <= level && b.ch[ch] >= level && delta >= hysteresis;
+  return a.ch[ch] >= level && b.ch[ch] <= level && -delta >= hysteresis;
 }
 
 uint64_t findTriggeredSeq(const Args &args, ScopeState *state, const std::vector<Sample> &ring,
