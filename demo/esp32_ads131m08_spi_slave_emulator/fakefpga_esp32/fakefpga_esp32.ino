@@ -76,7 +76,6 @@ static SPIClass adsSpi(VSPI);
 static SPISettings adsSpiSettings(SPI_HZ, MSBFIRST, SPI_MODE0);
 
 static uint8_t rxFrame[FRAME_BYTES];
-static uint8_t txZeros[FRAME_BYTES];
 static int32_t chRaw[NUM_CHANNELS];
 static float chNorm[NUM_CHANNELS];
 static Measurements meas;
@@ -158,7 +157,9 @@ static void configureFieldPwm() {
 static bool readAdsFrame() {
   digitalWrite(PIN_ADS_CS, LOW);
   adsSpi.beginTransaction(adsSpiSettings);
-  adsSpi.transferBytes(txZeros, rxFrame, FRAME_BYTES);
+  for (uint16_t i = 0; i < FRAME_BYTES; i++) {
+    rxFrame[i] = adsSpi.transfer(0x00);
+  }
   adsSpi.endTransaction();
   digitalWrite(PIN_ADS_CS, HIGH);
 
@@ -180,6 +181,7 @@ static void sampleAdsIfReady() {
   if (!running) return;
 
   bool hasPending = false;
+  bool levelPrime = false;
   noInterrupts();
   if (drdyPending > 0) {
     drdyPending--;
@@ -192,13 +194,14 @@ static void sampleAdsIfReady() {
     if (framesRead == 0 || idleUs > 5000) {
       if (digitalRead(PIN_ADS_DRDY) == HIGH) return;
       hasPending = true;
+      levelPrime = true;
     } else {
       return;
     }
   }
 
   const uint32_t nowReadUs = micros();
-  if ((uint32_t)(nowReadUs - lastAdsReadUs) < MIN_ADS_READ_INTERVAL_US) return;
+  if (levelPrime && (uint32_t)(nowReadUs - lastAdsReadUs) < MIN_ADS_READ_INTERVAL_US) return;
   lastAdsReadUs = nowReadUs;
 
   if (!readAdsFrame()) return;
