@@ -32,6 +32,7 @@ constexpr size_t kRingSize = 1u << 16;
 constexpr double kAdc24FullScale = 8388607.0;
 constexpr float kLineHz = 60.0f;
 constexpr float kVisibleCycles = 6.0f;
+constexpr float kTraceUseHeight = 0.66f;
 constexpr std::array<const char *, kMaxChannels> kNames = {
     "VA", "VB", "VC", "VAN", "IA", "IB", "IC", "IN"};
 
@@ -70,6 +71,21 @@ struct Sample {
   std::array<float, kMaxChannels> ch{};
 };
 
+enum ViewMode : int {
+  VIEW_SPLIT = 0,
+  VIEW_OVERLAY = 1,
+  VIEW_STACKED = 2,
+};
+
+struct Measurements {
+  float freq = 0.0f;
+  float rms = 0.0f;
+  float peak = 0.0f;
+  float vpp = 0.0f;
+  float phase = 0.0f;
+  float thd = 0.0f;
+};
+
 struct ScopeState {
   std::atomic<bool> running{true};
   std::atomic<bool> capture{true};
@@ -84,6 +100,12 @@ struct ScopeState {
   std::atomic<float> trigger_level{0.0f};
   std::atomic<float> volts_per_div{0.25f};
   std::atomic<float> time_per_div{kVisibleCycles / kLineHz / 10.0f};
+  std::atomic<float> horizontal_position{0.25f};
+  std::atomic<int> selected_channel{0};
+  std::atomic<int> view_mode{VIEW_SPLIT};
+  std::atomic<bool> show_grid{true};
+  std::atomic<bool> persistence{true};
+  std::atomic<bool> panel_open{true};
   std::atomic<bool> show_channel[kMaxChannels];
 };
 
@@ -91,6 +113,7 @@ struct DisplayFrame {
   size_t count = 0;
   uint64_t end_seq = 0;
   bool triggered = false;
+  std::array<Measurements, kMaxChannels> measurements{};
   std::vector<Sample> samples;
 };
 
@@ -419,7 +442,8 @@ uint64_t findTriggerStart(const Args &args, ScopeState *state, const std::vector
   *triggered = false;
   if (latest < 4) return latest > count ? latest - count : 0;
 
-  const uint64_t pre = count / 4;
+  const float pos = std::clamp(state->horizontal_position.load(), 0.08f, 0.85f);
+  const uint64_t pre = std::clamp<uint64_t>(static_cast<uint64_t>(count * pos), 8, count - 8);
   const uint64_t post = count - pre;
   const uint64_t scan_from = latest > post ? latest - post : 1;
   const uint64_t scan_span = std::min<uint64_t>(count, kRingSize - 2);
@@ -435,6 +459,44 @@ uint64_t findTriggerStart(const Args &args, ScopeState *state, const std::vector
     }
   }
   return latest > count ? latest - count : 0;
+}
+
+Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_rate) {
+  Measurements m{};
+  if (frame.count < 4) return m;
+
+  float min_v = 1.0f, max_v = -1.0f;
+  double sum_sq = 0.0;
+  int rising_crossings = 0;
+  size_t first_cross = 0, last_cross = 0;
+  const float level = 0.0f;
+
+  for (size_t i = 0; i < frame.count; ++i) {
+    const float v = frame.samples[i].ch[channel];
+    min_v = std::min(min_v, v);
+    max_v = std::max(max_v, v);
+    sum_sq += static_cast<double>(v) * static_cast<double>(v);
+    if (i > 0) {
+      const float a = frame.samples[i - 1].ch[channel];
+      if (a < level && v >= level) {
+        if (rising_crossings == 0) first_cross = i;
+        last_cross = i;
+        rising_crossings++;
+      }
+    }
+  }
+
+  m.peak = std::max(std::fabs(min_v), std::fabs(max_v));
+  m.vpp = max_v - min_v;
+  m.rms = std::sqrt(sum_sq / static_cast<double>(frame.count));
+  if (rising_crossings >= 2 && last_cross > first_cross) {
+    const double cycles = static_cast<double>(rising_crossings - 1);
+    const double seconds = static_cast<double>(last_cross - first_cross) / std::max(1, sample_rate);
+    m.freq = static_cast<float>(cycles / std::max(0.000001, seconds));
+  }
+  m.phase = 0.0f;
+  m.thd = 0.0f;
+  return m;
 }
 
 void processingThread(const Args args, ScopeState *state, const std::vector<Sample> *ring,
@@ -455,6 +517,9 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
         for (size_t i = 0; i < count; ++i) {
           dst.samples[i] = (*ring)[(start + i) & (kRingSize - 1)];
         }
+        for (int ch = 0; ch < args.channels; ++ch) {
+          dst.measurements[ch] = measureChannel(dst, ch, args.sample_rate);
+        }
         state->front_display.store(back, std::memory_order_release);
       }
     }
@@ -468,6 +533,33 @@ void setColor(SDL_Renderer *r, Color c) {
 
 void line(SDL_Renderer *r, float x1, float y1, float x2, float y2) {
   SDL_RenderDrawLineF(r, x1, y1, x2, y2);
+}
+
+void thickLine(SDL_Renderer *r, float x1, float y1, float x2, float y2, int width) {
+  if (width <= 1) {
+    line(r, x1, y1, x2, y2);
+    return;
+  }
+  const float dx = std::fabs(x2 - x1);
+  const float dy = std::fabs(y2 - y1);
+  const int half = width / 2;
+  for (int o = -half; o <= half; ++o) {
+    if (dx > dy) line(r, x1, y1 + o, x2, y2 + o);
+    else line(r, x1 + o, y1, x2 + o, y2);
+  }
+}
+
+Color withAlpha(Color c, uint8_t a) {
+  c.a = a;
+  return c;
+}
+
+Color scaled(Color c, float factor, uint8_t alpha) {
+  c.r = static_cast<uint8_t>(std::clamp(c.r * factor, 0.0f, 255.0f));
+  c.g = static_cast<uint8_t>(std::clamp(c.g * factor, 0.0f, 255.0f));
+  c.b = static_cast<uint8_t>(std::clamp(c.b * factor, 0.0f, 255.0f));
+  c.a = alpha;
+  return c;
 }
 
 std::array<uint8_t, 7> glyphRows(char ch) {
@@ -518,10 +610,11 @@ std::array<uint8_t, 7> glyphRows(char ch) {
   }
 }
 
-void drawText(SDL_Renderer *r, int x, int y, const std::string &text, Color color, int scale = 2) {
+void drawText(SDL_Renderer *r, int x, int y, const char *text, Color color, int scale = 2) {
   setColor(r, color);
   int cx = x;
-  for (char ch : text) {
+  for (const char *p = text; *p; ++p) {
+    char ch = *p;
     if (ch == ' ') {
       cx += 4 * scale;
       continue;
@@ -539,99 +632,355 @@ void drawText(SDL_Renderer *r, int x, int y, const std::string &text, Color colo
   }
 }
 
-void drawGrid(SDL_Renderer *r, SDL_Rect area) {
-  SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-  for (int x = 0; x <= 50; ++x) {
-    float px = area.x + area.w * (x / 50.0f);
-    setColor(r, x % 5 == 0 ? Color{55, 65, 70, 180} : Color{28, 34, 38, 150});
-    line(r, px, area.y, px, area.y + area.h);
-  }
-  for (int y = 0; y <= 40; ++y) {
-    float py = area.y + area.h * (y / 40.0f);
-    setColor(r, y % 5 == 0 ? Color{55, 65, 70, 180} : Color{28, 34, 38, 150});
-    line(r, area.x, py, area.x + area.w, py);
-  }
-  setColor(r, {95, 110, 115, 230});
-  line(r, area.x, area.y + area.h / 2.0f, area.x + area.w, area.y + area.h / 2.0f);
-  line(r, area.x + area.w / 2.0f, area.y, area.x + area.w / 2.0f, area.y + area.h);
+void drawText(SDL_Renderer *r, int x, int y, const std::string &text, Color color, int scale = 2) {
+  drawText(r, x, y, text.c_str(), color, scale);
 }
 
-void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect area, float vdiv) {
+void fillRect(SDL_Renderer *r, SDL_Rect rect, Color color) {
+  setColor(r, color);
+  SDL_RenderFillRect(r, &rect);
+}
+
+void drawRect(SDL_Renderer *r, SDL_Rect rect, Color color) {
+  setColor(r, color);
+  SDL_RenderDrawRect(r, &rect);
+}
+
+struct RenderCache {
+  SDL_Texture *grid = nullptr;
+  SDL_Rect grid_area{0, 0, 0, 0};
+  bool grid_valid = false;
+};
+
+void destroyCache(RenderCache *cache) {
+  if (cache->grid) SDL_DestroyTexture(cache->grid);
+  cache->grid = nullptr;
+  cache->grid_valid = false;
+}
+
+void buildGridTexture(SDL_Renderer *r, RenderCache *cache, SDL_Rect area) {
+  if (cache->grid_valid && cache->grid && cache->grid_area.x == area.x &&
+      cache->grid_area.y == area.y && cache->grid_area.w == area.w &&
+      cache->grid_area.h == area.h) {
+    return;
+  }
+
+  destroyCache(cache);
+  cache->grid_area = area;
+  cache->grid = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                  std::max(1, area.w), std::max(1, area.h));
+  if (!cache->grid) return;
+  SDL_SetTextureBlendMode(cache->grid, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderTarget(r, cache->grid);
+  fillRect(r, SDL_Rect{0, 0, area.w, area.h}, {0, 0, 0, 0});
+
+  SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+  for (int x = 0; x <= 50; ++x) {
+    float px = area.w * (x / 50.0f);
+    const bool major = x % 5 == 0;
+    const bool center = x == 25;
+    setColor(r, center ? Color{100, 120, 126, 125}
+                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
+    line(r, px, 0, px, area.h);
+  }
+  for (int y = 0; y <= 40; ++y) {
+    float py = area.h * (y / 40.0f);
+    const bool major = y % 5 == 0;
+    const bool center = y == 20;
+    setColor(r, center ? Color{100, 120, 126, 125}
+                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
+    line(r, 0, py, area.w, py);
+  }
+  SDL_SetRenderTarget(r, nullptr);
+  cache->grid_valid = true;
+}
+
+void drawGrid(SDL_Renderer *r, RenderCache *cache, SDL_Rect area, bool show_grid) {
+  if (!show_grid) return;
+  buildGridTexture(r, cache, area);
+  if (cache->grid) SDL_RenderCopy(r, cache->grid, nullptr, &area);
+}
+
+SDL_Rect plotForChannel(SDL_Rect plot, int channel, int mode) {
+  if (mode == VIEW_OVERLAY) return plot;
+  if (mode == VIEW_SPLIT) {
+    const int gap = 14;
+    const int half = (plot.h - gap) / 2;
+    if (channel < 4) return SDL_Rect{plot.x, plot.y, plot.w, half};
+    return SDL_Rect{plot.x, plot.y + half + gap, plot.w, half};
+  }
+  const int gap = 4;
+  const int lane = (plot.h - gap * 7) / 8;
+  return SDL_Rect{plot.x, plot.y + channel * (lane + gap), plot.w, lane};
+}
+
+const char *viewModeName(int mode) {
+  switch (mode) {
+    case VIEW_OVERLAY: return "OVERLAY";
+    case VIEW_STACKED: return "STACKED";
+    default: return "SPLIT";
+  }
+}
+
+float groupPeak(const DisplayFrame &frame, int channel, int mode, int channels) {
+  float peak = 0.05f;
+  int first = channel, last = channel;
+  if (mode == VIEW_OVERLAY) {
+    first = 0;
+    last = channels - 1;
+  } else if (mode == VIEW_SPLIT) {
+    first = channel < 4 ? 0 : 4;
+    last = channel < 4 ? 3 : channels - 1;
+  }
+  for (int ch = first; ch <= last; ++ch) {
+    for (size_t i = 0; i < frame.count; ++i) {
+      peak = std::max(peak, std::fabs(frame.samples[i].ch[ch]));
+    }
+  }
+  return peak;
+}
+
+void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect area,
+               float vdiv, float peak, Color color, int width) {
   if (frame.count < 2) return;
-  setColor(r, kTraceColors[channel]);
   const float center = area.y + area.h * 0.5f;
-  const float scale = (area.h / 8.0f) / std::max(0.02f, vdiv);
+  const float manual_scale = (area.h / 8.0f) / std::max(0.02f, vdiv);
+  const float auto_scale = (area.h * kTraceUseHeight * 0.5f) / std::max(0.05f, peak);
+  const float scale = std::min(manual_scale, auto_scale);
   const float step = static_cast<float>(area.w) / static_cast<float>(frame.count - 1);
   float last_x = area.x;
   float last_y = center - frame.samples[0].ch[channel] * scale;
+  setColor(r, color);
   for (size_t i = 1; i < frame.count; ++i) {
     float x = area.x + step * static_cast<float>(i);
     float y = center - frame.samples[i].ch[channel] * scale;
-    line(r, last_x, last_y, x, y);
+    thickLine(r, last_x, last_y, x, y, width);
     last_x = x;
     last_y = y;
   }
 }
 
+void drawTrigger(SDL_Renderer *r, SDL_Rect plot, ScopeState *state) {
+  const float vdiv = std::max(0.02f, state->volts_per_div.load());
+  const float trig_y = plot.y + plot.h * 0.5f -
+                       state->trigger_level.load() * ((plot.h / 8.0f) / vdiv);
+  setColor(r, {255, 150, 55, 210});
+  thickLine(r, plot.x - 8, trig_y, plot.x + plot.w + 8, trig_y, 1);
+  drawText(r, plot.x + plot.w - 64, static_cast<int>(trig_y) - 16, "TRIG",
+           {255, 170, 80, 210}, 1);
+}
+
+void drawTopBar(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
+                double render_fps, int w) {
+  fillRect(r, SDL_Rect{0, 0, w, 58}, {7, 10, 12, 248});
+  drawRect(r, SDL_Rect{0, 57, w, 1}, {48, 58, 64, 180});
+  Color green{65, 255, 126, 255};
+  Color amber{255, 190, 80, 255};
+  Color text{205, 222, 220, 240};
+  Color dim{130, 148, 150, 210};
+
+  SDL_Rect run{18, 14, 78, 28};
+  fillRect(r, run, state->capture.load() ? Color{16, 80, 42, 255} : Color{90, 60, 20, 255});
+  drawRect(r, run, state->capture.load() ? green : amber);
+  drawText(r, run.x + 17, run.y + 7, state->capture.load() ? "RUN" : "HOLD", green, 2);
+
+  SDL_Rect trig{112, 14, 104, 28};
+  fillRect(r, trig, frame.triggered ? Color{58, 44, 12, 255} : Color{24, 29, 32, 255});
+  drawRect(r, trig, frame.triggered ? amber : Color{80, 94, 98, 210});
+  drawText(r, trig.x + 12, trig.y + 7,
+           frame.triggered ? "TRIG'D" : (state->trigger_auto.load() ? "AUTO" : "WAIT"),
+           frame.triggered ? amber : dim, 2);
+
+  char buf[64];
+  int x = 250;
+  std::snprintf(buf, sizeof(buf), "FS %.1fKS/S", args.sample_rate / 1000.0f);
+  drawText(r, x, 18, buf, text, 2);
+  x += 178;
+  std::snprintf(buf, sizeof(buf), "%.3GMS/DIV", state->time_per_div.load() * 1000.0f);
+  drawText(r, x, 18, buf, text, 2);
+  x += 188;
+  std::snprintf(buf, sizeof(buf), "%.0FMV/DIV", state->volts_per_div.load() * 1000.0f);
+  drawText(r, x, 18, buf, text, 2);
+  x += 178;
+  std::snprintf(buf, sizeof(buf), "MEM %.1FK", kRingSize / 1024.0f);
+  drawText(r, x, 18, buf, dim, 2);
+  x += 150;
+  std::snprintf(buf, sizeof(buf), "FPS %.0f", render_fps);
+  drawText(r, x, 18, buf, render_fps >= 55.0 ? green : amber, 2);
+}
+
+void drawSidePanel(SDL_Renderer *r, const Args &args, ScopeState *state, SDL_Rect panel) {
+  if (!state->panel_open.load()) return;
+  fillRect(r, panel, {9, 13, 16, 238});
+  drawRect(r, panel, {52, 64, 70, 170});
+  Color title{185, 205, 202, 235};
+  Color dim{120, 140, 145, 220};
+  int selected = state->selected_channel.load();
+  int y = panel.y + 18;
+  drawText(r, panel.x + 16, y, "CHANNELS", title, 2);
+  y += 30;
+  for (int ch = 0; ch < args.channels; ++ch) {
+    Color c = ch == selected ? kTraceColors[ch] : scaled(kTraceColors[ch], 0.68f, 215);
+    if (ch == selected) fillRect(r, SDL_Rect{panel.x + 10, y - 5, panel.w - 20, 24}, {28, 36, 38, 230});
+    fillRect(r, SDL_Rect{panel.x + 16, y + 2, 14, 14}, c);
+    char label[32];
+    std::snprintf(label, sizeof(label), "CH%d %s", ch + 1,
+                  state->show_channel[ch].load() ? "ON" : "OFF");
+    drawText(r, panel.x + 40, y, label, state->show_channel[ch].load() ? c : dim, 2);
+    y += 25;
+  }
+  y += 16;
+  drawText(r, panel.x + 16, y, "TRIGGER", title, 2);
+  y += 28;
+  drawText(r, panel.x + 16, y, "EDGE", dim, 2);
+  drawText(r, panel.x + 92, y, state->trigger_rising.load() ? "RISING" : "FALL", title, 2);
+  y += 24;
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "LEVEL %.2F", state->trigger_level.load());
+  drawText(r, panel.x + 16, y, buf, dim, 2);
+  y += 42;
+  drawText(r, panel.x + 16, y, "ACQUISITION", title, 2);
+  y += 28;
+  std::snprintf(buf, sizeof(buf), "RATE %d", args.sample_rate);
+  drawText(r, panel.x + 16, y, buf, dim, 2);
+  y += 24;
+  std::snprintf(buf, sizeof(buf), "BUFFER %uK", static_cast<unsigned>(kRingSize / 1024));
+  drawText(r, panel.x + 16, y, buf, dim, 2);
+  y += 24;
+  drawText(r, panel.x + 16, y, viewModeName(state->view_mode.load()), dim, 2);
+}
+
+void drawBottomBar(SDL_Renderer *r, const Args &args, ScopeState *state,
+                   const DisplayFrame &frame, int w, int h) {
+  fillRect(r, SDL_Rect{0, h - 62, w, 62}, {7, 10, 12, 248});
+  drawRect(r, SDL_Rect{0, h - 63, w, 1}, {48, 58, 64, 180});
+  const int ch = std::clamp(state->selected_channel.load(), 0, args.channels - 1);
+  const Measurements &m = frame.measurements[ch];
+  Color c = kTraceColors[ch];
+  fillRect(r, SDL_Rect{20, h - 42, 18, 18}, c);
+  char buf[192];
+  std::snprintf(buf, sizeof(buf),
+                "CH%d %s   FREQ %.2FHZ   RMS %.3F   PEAK %.3F   VPP %.3F   PHASE %.1F   THD %.1F",
+                ch + 1, kNames[ch], m.freq, m.rms, m.peak, m.vpp, m.phase, m.thd);
+  drawText(r, 52, h - 44, buf, {205, 222, 220, 238}, 2);
+}
+
+void drawTraceLayer(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
+                    SDL_Rect plot, uint8_t alpha, int width, bool glow) {
+  const int mode = state->view_mode.load();
+  const int selected = state->selected_channel.load();
+  for (int ch = 0; ch < args.channels; ++ch) {
+    if (!state->show_channel[ch].load()) continue;
+    SDL_Rect area = plotForChannel(plot, ch, mode);
+    const float peak = groupPeak(frame, ch, mode, args.channels);
+    const bool is_selected = ch == selected;
+    Color color = is_selected ? kTraceColors[ch] : scaled(kTraceColors[ch], 0.72f, alpha);
+    color.a = is_selected ? std::min<int>(255, alpha + 35) : alpha;
+    drawTrace(r, frame, ch, area, state->volts_per_div.load(), peak, color,
+              is_selected ? width + 1 : width);
+    if (glow && is_selected) {
+      drawTrace(r, frame, ch, area, state->volts_per_div.load(), peak,
+                scaled(kTraceColors[ch], 1.0f, 50), width + 3);
+    }
+  }
+}
+
 void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
-            double render_fps) {
+            const DisplayFrame &previous, RenderCache *cache, double render_fps) {
   int w = 0, h = 0;
   SDL_GetRendererOutputSize(r, &w, &h);
-  if (args.phosphor) {
+  if (state->persistence.load()) {
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    setColor(r, {0, 0, 0, 45});
+    setColor(r, {0, 0, 0, 58});
     SDL_Rect full{0, 0, w, h};
     SDL_RenderFillRect(r, &full);
   } else {
-    setColor(r, {0, 0, 0, 255});
-    SDL_RenderClear(r);
+    fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
   }
 
-  SDL_Rect plot{70, 74, w - 110, h - 150};
-  drawGrid(r, plot);
+  const int panel_w = state->panel_open.load() ? 250 : 0;
+  SDL_Rect plot{70, 74, w - 100 - panel_w, h - 150};
+  fillRect(r, plot, {0, 0, 0, 255});
+  drawGrid(r, cache, plot, state->show_grid.load());
 
-  for (int ch = 0; ch < args.channels; ++ch) {
-    if (state->show_channel[ch].load()) drawTrace(r, frame, ch, plot, state->volts_per_div.load());
+  if (state->persistence.load()) drawTraceLayer(r, args, state, previous, plot, 42, 1, false);
+  drawTraceLayer(r, args, state, frame, plot, 120, 2, true);
+  drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
+  drawTrigger(r, plot, state);
+
+  if (state->view_mode.load() == VIEW_SPLIT) {
+    drawText(r, plot.x + 12, plot.y + 10, "VOLTAGE", {112, 132, 136, 150}, 2);
+    drawText(r, plot.x + 12, plot.y + plot.h / 2 + 18, "CURRENT", {112, 132, 136, 150}, 2);
   }
-
-  setColor(r, {12, 16, 18, 235});
-  SDL_Rect top{0, 0, w, 54};
-  SDL_RenderFillRect(r, &top);
-  Color green{80, 255, 120, 255};
-  Color amber{255, 210, 70, 255};
-  Color gray{160, 170, 175, 255};
-
-  std::string status = state->capture.load() ? "RUN" : "HOLD";
-  std::string trig = frame.triggered ? "TRIG'D" : (state->trigger_auto.load() ? "AUTO" : "WAIT");
-  char line1[256];
-  std::snprintf(line1, sizeof(line1), "%s   %s   6CYC   Fs %dS/s   %.3f ms/div   %.2f V/div   FPS %.0f",
-                status.c_str(), trig.c_str(), args.sample_rate,
-                state->time_per_div.load() * 1000.0f, state->volts_per_div.load(), render_fps);
-  drawText(r, 18, 14, line1, state->capture.load() ? green : amber, 2);
-
-  for (int i = 0; i < args.channels; ++i) {
-    int x = 82 + i * 138;
-    int y = h - 52;
-    setColor(r, kTraceColors[i]);
-    SDL_Rect sw{x, y, 18, 18};
-    SDL_RenderFillRect(r, &sw);
-    drawText(r, x + 28, y,
-             std::string(kNames[i]) + (state->show_channel[i].load() ? " ON" : " OFF"),
-             state->show_channel[i].load() ? kTraceColors[i] : gray, 2);
-  }
-
-  float trig_y = plot.y + plot.h * 0.5f - state->trigger_level.load() *
-                                           ((plot.h / 8.0f) / state->volts_per_div.load());
-  setColor(r, {255, 120, 40, 220});
-  line(r, plot.x - 12, trig_y, plot.x + plot.w + 12, trig_y);
+  drawTopBar(r, args, state, frame, render_fps, w);
+  drawSidePanel(r, args, state, SDL_Rect{w - panel_w + 8, 74, std::max(0, panel_w - 18), h - 150});
+  drawBottomBar(r, args, state, frame, w, h);
 }
 
-void handleEvent(const SDL_Event &event, ScopeState *state, const Args &args) {
+struct InteractionState {
+  bool dragging = false;
+  int last_x = 0;
+  int last_y = 0;
+};
+
+void autoscaleFromFrame(ScopeState *state, const DisplayFrame &frame, int channels) {
+  float peak = 0.05f;
+  for (int ch = 0; ch < channels; ++ch) {
+    if (!state->show_channel[ch].load()) continue;
+    for (size_t i = 0; i < frame.count; ++i) peak = std::max(peak, std::fabs(frame.samples[i].ch[ch]));
+  }
+  const float divs_for_peak = 2.6f;
+  state->volts_per_div = std::clamp(peak / divs_for_peak, 0.02f, 1.0f);
+}
+
+void handleEvent(const SDL_Event &event, ScopeState *state, const Args &args,
+                 InteractionState *interaction, const DisplayFrame &frame) {
+  if (event.type == SDL_MOUSEWHEEL) {
+    const bool shift = (SDL_GetModState() & KMOD_SHIFT) != 0;
+    const float factor = event.wheel.y > 0 ? 0.86f : 1.16f;
+    if (shift) state->volts_per_div = std::clamp(state->volts_per_div.load() * factor, 0.02f, 2.0f);
+    else state->time_per_div = std::clamp(state->time_per_div.load() * factor, 0.001f, 0.1f);
+    return;
+  }
+  if (event.type == SDL_MOUSEBUTTONDOWN) {
+    if (event.button.button == SDL_BUTTON_LEFT) {
+      if (event.button.clicks >= 2) {
+        autoscaleFromFrame(state, frame, args.channels);
+      } else {
+        interaction->dragging = true;
+        interaction->last_x = event.button.x;
+        interaction->last_y = event.button.y;
+      }
+    }
+    return;
+  }
+  if (event.type == SDL_MOUSEBUTTONUP) {
+    if (event.button.button == SDL_BUTTON_LEFT) interaction->dragging = false;
+    return;
+  }
+  if (event.type == SDL_MOUSEMOTION && interaction->dragging) {
+    const int dx = event.motion.x - interaction->last_x;
+    const int dy = event.motion.y - interaction->last_y;
+    interaction->last_x = event.motion.x;
+    interaction->last_y = event.motion.y;
+    state->horizontal_position =
+        std::clamp(state->horizontal_position.load() - dx * 0.0015f, 0.08f, 0.85f);
+    state->trigger_level =
+        std::clamp(state->trigger_level.load() - dy * 0.0025f, -1.0f, 1.0f);
+    return;
+  }
   if (event.type != SDL_KEYDOWN) return;
   SDL_Keycode key = event.key.keysym.sym;
   if (key == SDLK_ESCAPE || key == SDLK_q) state->running = false;
   if (key == SDLK_SPACE) state->capture = !state->capture.load();
   if (key == SDLK_t) state->trigger_auto = !state->trigger_auto.load();
+  if (key == SDLK_g) state->show_grid = !state->show_grid.load();
+  if (key == SDLK_p) state->persistence = !state->persistence.load();
+  if (key == SDLK_m || key == SDLK_v) {
+    state->view_mode = (state->view_mode.load() + 1) % 3;
+  }
+  if (key == SDLK_o) state->panel_open = !state->panel_open.load();
+  if (key == SDLK_a) autoscaleFromFrame(state, frame, args.channels);
   if (key == SDLK_e) state->trigger_rising = !state->trigger_rising.load();
   if (key == SDLK_LEFTBRACKET) state->trigger_level = state->trigger_level.load() - 0.05f;
   if (key == SDLK_RIGHTBRACKET) state->trigger_level = state->trigger_level.load() + 0.05f;
@@ -641,7 +990,11 @@ void handleEvent(const SDL_Event &event, ScopeState *state, const Args &args) {
   if (key == SDLK_MINUS) state->time_per_div = state->time_per_div.load() * 1.25f;
   if (key == SDLK_UP) state->volts_per_div = state->volts_per_div.load() * 0.8f;
   if (key == SDLK_DOWN) state->volts_per_div = state->volts_per_div.load() * 1.25f;
-  if (key == SDLK_TAB) state->trigger_channel = (state->trigger_channel.load() + 1) % args.channels;
+  if (key == SDLK_TAB) {
+    int next = (state->selected_channel.load() + 1) % args.channels;
+    state->selected_channel = next;
+    state->trigger_channel = next;
+  }
   if (key >= SDLK_1 && key <= SDLK_8) {
     int ch = static_cast<int>(key - SDLK_1);
     if (ch < args.channels) state->show_channel[ch] = !state->show_channel[ch].load();
@@ -660,7 +1013,8 @@ void renderThread(const Args args, ScopeState *state,
   SDL_Window *window = SDL_CreateWindow("ADS131M08 Instrument Scope", SDL_WINDOWPOS_CENTERED,
                                        SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
   SDL_Renderer *renderer = SDL_CreateRenderer(
-      window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+      window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC |
+                    SDL_RENDERER_TARGETTEXTURE);
   if (!window || !renderer) {
     state->running = false;
     SDL_Quit();
@@ -671,14 +1025,17 @@ void renderThread(const Args args, ScopeState *state,
   auto last = std::chrono::steady_clock::now();
   int frames = 0;
   double render_fps = 0.0;
+  RenderCache cache;
+  InteractionState interaction;
   while (state->running.load()) {
     SDL_Event event;
+    int front = state->front_display.load(std::memory_order_acquire);
+    int previous = 1 - front;
     while (SDL_PollEvent(&event)) {
       if (event.type == SDL_QUIT) state->running = false;
-      handleEvent(event, state, args);
+      handleEvent(event, state, args, &interaction, (*display)[front]);
     }
-    int front = state->front_display.load(std::memory_order_acquire);
-    drawUi(renderer, args, state, (*display)[front], render_fps);
+    drawUi(renderer, args, state, (*display)[front], (*display)[previous], &cache, render_fps);
     SDL_RenderPresent(renderer);
 
     frames++;
@@ -690,6 +1047,7 @@ void renderThread(const Args args, ScopeState *state,
       last = now;
     }
   }
+  destroyCache(&cache);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();
