@@ -681,7 +681,7 @@ void setup() {
   }
 
   printConfig();
-  startStreaming();
+  Serial.println(F("Waiting for START or SYNCSTART"));
 }
 
 void loop() {
