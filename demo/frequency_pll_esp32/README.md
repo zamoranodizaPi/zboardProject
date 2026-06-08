@@ -17,7 +17,7 @@ Modulo de calculo de frecuencia para medidor de energia/proteccion electrica.
 
 - `frequency_pll.h`
 - `frequency_pll.cpp`
-- `example.ino`
+- `frequency_pll_esp32.ino` ejemplo compilable Arduino
 
 ## API
 
