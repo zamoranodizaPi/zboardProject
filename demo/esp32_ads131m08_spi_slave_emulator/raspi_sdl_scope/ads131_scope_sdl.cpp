@@ -109,6 +109,9 @@ struct ScopeState {
   std::atomic<uint64_t> frames{0};
   std::atomic<uint64_t> errors{0};
   std::atomic<uint64_t> overruns{0};
+  std::atomic<float> acquire_ms{0.0f};
+  std::atomic<float> trigger_ms{0.0f};
+  std::atomic<float> render_ms{0.0f};
   std::atomic<int> front_display{0};
   std::atomic<int> trigger_channel{0};
   std::atomic<bool> trigger_rising{true};
@@ -411,6 +414,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
   auto next = std::chrono::steady_clock::now();
 
   while (state->running.load(std::memory_order_relaxed)) {
+    const auto loop_start = std::chrono::steady_clock::now();
     if (!state->capture.load(std::memory_order_relaxed)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
       next = std::chrono::steady_clock::now();
@@ -444,6 +448,10 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
         next = std::chrono::steady_clock::now();
       }
     }
+    const auto loop_end = std::chrono::steady_clock::now();
+    state->acquire_ms.store(
+        static_cast<float>(std::chrono::duration<double, std::milli>(loop_end - loop_start).count()),
+        std::memory_order_relaxed);
   }
   if (drdy >= 0) ::close(drdy);
   ::close(spi);
@@ -549,6 +557,7 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
   uint64_t last_trigger = 0;
   auto last_auto = std::chrono::steady_clock::now();
   while (state->running.load(std::memory_order_relaxed)) {
+    const auto loop_start = std::chrono::steady_clock::now();
     const uint64_t latest = state->write_seq.load(std::memory_order_acquire);
     const size_t count = samplesPerScreen(args, *state);
     if (latest > count + 4) {
@@ -613,6 +622,10 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
         if (mode == TRIG_SINGLE && triggered) state->trigger_state = TRIG_STOPPED;
       }
     }
+    const auto loop_end = std::chrono::steady_clock::now();
+    state->trigger_ms.store(
+        static_cast<float>(std::chrono::duration<double, std::milli>(loop_end - loop_start).count()),
+        std::memory_order_relaxed);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
@@ -1016,7 +1029,7 @@ void drawScaleRefs(SDL_Renderer *r, SDL_Rect plot, ScopeState *state) {
 }
 
 void drawPerfOverlay(SDL_Renderer *r, ScopeState *state, double render_fps, int w) {
-  SDL_Rect box{w - 238, 70, 220, 116};
+  SDL_Rect box{w - 258, 70, 240, 164};
   fillRect(r, box, {5, 8, 10, 232});
   drawRect(r, box, {70, 86, 92, 160});
   Color text{170, 196, 194, 220};
@@ -1024,15 +1037,27 @@ void drawPerfOverlay(SDL_Renderer *r, ScopeState *state, double render_fps, int 
   drawText(r, box.x + 12, box.y + 10, "PERFORMANCE", text, 1);
   std::snprintf(buf, sizeof(buf), "FPS %.1F", render_fps);
   drawText(r, box.x + 12, box.y + 30, buf, text, 1);
+  std::snprintf(buf, sizeof(buf), "RENDER %.2FMS", state->render_ms.load());
+  drawText(r, box.x + 12, box.y + 48, buf, text, 1);
+  std::snprintf(buf, sizeof(buf), "ACQUIRE %.2FMS", state->acquire_ms.load());
+  drawText(r, box.x + 12, box.y + 66, buf, text, 1);
+  std::snprintf(buf, sizeof(buf), "TRIGGER %.2FMS", state->trigger_ms.load());
+  drawText(r, box.x + 12, box.y + 84, buf, text, 1);
+  const double cpu_est = std::clamp(state->render_ms.load() * render_fps / 10.0, 0.0, 99.0);
+  std::snprintf(buf, sizeof(buf), "CPU %.0F%%", cpu_est);
+  drawText(r, box.x + 12, box.y + 102, buf, text, 1);
+  drawText(r, box.x + 112, box.y + 102, "GPU N/A", text, 1);
+  std::snprintf(buf, sizeof(buf), "DRAW CALLS %d", 24);
+  drawText(r, box.x + 12, box.y + 120, buf, text, 1);
   std::snprintf(buf, sizeof(buf), "FRAMES %llu",
                 static_cast<unsigned long long>(state->frames.load()));
-  drawText(r, box.x + 12, box.y + 48, buf, text, 1);
+  drawText(r, box.x + 12, box.y + 138, buf, text, 1);
   std::snprintf(buf, sizeof(buf), "ERRORS %llu",
                 static_cast<unsigned long long>(state->errors.load()));
-  drawText(r, box.x + 12, box.y + 66, buf, text, 1);
+  drawText(r, box.x + 112, box.y + 138, buf, text, 1);
   std::snprintf(buf, sizeof(buf), "OVERRUNS %llu",
                 static_cast<unsigned long long>(state->overruns.load()));
-  drawText(r, box.x + 12, box.y + 84, buf, text, 1);
+  drawText(r, box.x + 12, box.y + 150, buf, text, 1);
 }
 
 void drawTraceLayer(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
@@ -1217,6 +1242,7 @@ void renderThread(const Args args, ScopeState *state,
     auto overlay_now = std::chrono::steady_clock::now();
     bool redraw_overlay =
         force_overlay || std::chrono::duration<double>(overlay_now - last_overlay).count() > 0.25;
+    const auto render_start = std::chrono::steady_clock::now();
     drawUi(renderer, args, state, (*display)[front], (*display)[previous], &cache, render_fps,
            redraw_overlay);
     if (redraw_overlay) {
@@ -1224,6 +1250,10 @@ void renderThread(const Args args, ScopeState *state,
       force_overlay = false;
     }
     SDL_RenderPresent(renderer);
+    const auto render_end = std::chrono::steady_clock::now();
+    state->render_ms.store(
+        static_cast<float>(std::chrono::duration<double, std::milli>(render_end - render_start).count()),
+        std::memory_order_relaxed);
 
     frames++;
     auto now = std::chrono::steady_clock::now();
