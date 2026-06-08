@@ -82,7 +82,7 @@ Desde una consola local de la Raspberry:
 SDL_VIDEODRIVER=kmsdrm SDL_AUDIODRIVER=dummy ./ads131_scope_sdl \
   --spi-dev /dev/spidev0.0 \
   --serial /dev/ttyUSB0 \
-  --spi-hz 5000000 \
+  --spi-hz 2000000 \
   --bits 24 \
   --rate 4000 \
   --channels 8 \
