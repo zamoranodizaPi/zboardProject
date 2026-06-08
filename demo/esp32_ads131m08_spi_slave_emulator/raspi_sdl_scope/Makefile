@@ -8,7 +8,7 @@ SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
 
 CXXFLAGS ?= -O3 -pipe -Wall -Wextra -std=c++17 -pthread $(SDL_CFLAGS)
-LDFLAGS ?= -pthread $(SDL_LIBS)
+LDFLAGS ?= -pthread $(SDL_LIBS) -latomic
 
 .PHONY: all clean install-service
 
