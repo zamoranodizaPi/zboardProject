@@ -28,11 +28,8 @@ namespace {
 
 constexpr int kMaxChannels = 8;
 constexpr int kDisplayBuffers = 2;
-constexpr int kLogicalWidth = 1280;
-constexpr int kLogicalHeight = 720;
 constexpr size_t kRingSize = 1u << 16;
 constexpr size_t kMaxRenderPoints = 8192;
-constexpr size_t kTargetTracePoints = 320;
 constexpr double kAdc24FullScale = 8388607.0;
 constexpr float kLineHz = 60.0f;
 constexpr float kVisibleCycles = 6.0f;
@@ -748,7 +745,7 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
                float vdiv, float peak, Color color, int width) {
   if (frame.count < 2) return;
   static thread_local std::array<SDL_FPoint, kMaxRenderPoints> points;
-  const size_t point_count = std::min({frame.count, kMaxRenderPoints, kTargetTracePoints});
+  const size_t point_count = std::min(frame.count, kMaxRenderPoints);
   const float center = area.y + area.h * 0.5f;
   const float manual_scale = (area.h / 8.0f) / std::max(0.02f, vdiv);
   const float auto_scale = (area.h * kTraceUseHeight * 0.5f) / std::max(0.05f, peak);
@@ -756,9 +753,8 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
   const float step = static_cast<float>(area.w) / static_cast<float>(point_count - 1);
   setColor(r, color);
   for (size_t i = 0; i < point_count; ++i) {
-    const size_t src = (i * (frame.count - 1)) / (point_count - 1);
     points[i].x = area.x + step * static_cast<float>(i);
-    points[i].y = center - frame.samples[src].ch[channel] * scale;
+    points[i].y = center - frame.samples[i].ch[channel] * scale;
   }
   drawPolyline(r, points.data(), static_cast<int>(point_count), width);
 }
@@ -890,7 +886,8 @@ void drawTraceLayer(SDL_Renderer *r, const Args &args, ScopeState *state, const 
 
 void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
             const DisplayFrame &previous, RenderCache *cache, double render_fps, bool redraw_overlay) {
-  int w = kLogicalWidth, h = kLogicalHeight;
+  int w = 0, h = 0;
+  SDL_GetRendererOutputSize(r, &w, &h);
   if (redraw_overlay) fillRect(r, SDL_Rect{0, 0, w, h}, {0, 0, 0, 255});
 
   const int panel_w = state->panel_open.load() ? 250 : 0;
@@ -1018,7 +1015,6 @@ void renderThread(const Args args, ScopeState *state,
     return;
   }
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-  SDL_RenderSetLogicalSize(renderer, kLogicalWidth, kLogicalHeight);
 
   auto last = std::chrono::steady_clock::now();
   int frames = 0;
