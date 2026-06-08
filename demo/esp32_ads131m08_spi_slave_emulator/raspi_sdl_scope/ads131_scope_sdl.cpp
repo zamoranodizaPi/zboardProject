@@ -242,11 +242,54 @@ bool writeTextFile(const std::string &path, const std::string &value) {
   return ok;
 }
 
+int resolveSysfsGpio(int bcm_gpio) {
+  if (bcm_gpio < 0) return -1;
+  if (std::filesystem::exists("/sys/class/gpio/gpio" + std::to_string(bcm_gpio) + "/value")) {
+    return bcm_gpio;
+  }
+
+  int fallback = bcm_gpio;
+  for (const auto &entry : std::filesystem::directory_iterator("/sys/class/gpio")) {
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("gpiochip", 0) != 0) continue;
+
+    const std::string base_path = entry.path().string() + "/base";
+    const std::string label_path = entry.path().string() + "/label";
+    FILE *base_file = std::fopen(base_path.c_str(), "r");
+    if (!base_file) continue;
+    int base = 0;
+    if (std::fscanf(base_file, "%d", &base) != 1) {
+      std::fclose(base_file);
+      continue;
+    }
+    std::fclose(base_file);
+
+    char label[128] = {};
+    FILE *label_file = std::fopen(label_path.c_str(), "r");
+    if (label_file) {
+      std::fgets(label, sizeof(label), label_file);
+      std::fclose(label_file);
+    }
+    std::string label_text(label);
+    if (label_text.find("gpio") != std::string::npos ||
+        label_text.find("pinctrl") != std::string::npos ||
+        label_text.find("3f200000") != std::string::npos ||
+        label_text.find("fe200000") != std::string::npos) {
+      fallback = base + bcm_gpio;
+      if (std::filesystem::exists("/sys/class/gpio/gpio" + std::to_string(fallback) + "/value")) {
+        return fallback;
+      }
+    }
+  }
+  return fallback;
+}
+
 int openDrdyGpio(int gpio) {
   if (gpio < 0) return -1;
-  const std::string base = "/sys/class/gpio/gpio" + std::to_string(gpio);
+  const int sysfs_gpio = resolveSysfsGpio(gpio);
+  const std::string base = "/sys/class/gpio/gpio" + std::to_string(sysfs_gpio);
   if (!std::filesystem::exists(base + "/value")) {
-    writeTextFile("/sys/class/gpio/export", std::to_string(gpio));
+    writeTextFile("/sys/class/gpio/export", std::to_string(sysfs_gpio));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   writeTextFile(base + "/direction", "in");
@@ -290,6 +333,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       static_cast<size_t>(1 + args.channels + (args.crc ? 1 : 0)) * (args.word_bits / 8);
   std::vector<uint8_t> tx(frame_bytes, 0), rx(frame_bytes, 0);
   int drdy = openDrdyGpio(args.drdy_gpio);
+  std::cerr << (drdy >= 0 ? "DRDY sync enabled\n" : "DRDY unavailable, timed polling fallback\n");
   Sample last_good;
   bool have_last_good = false;
   auto next = std::chrono::steady_clock::now();
