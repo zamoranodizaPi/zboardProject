@@ -681,7 +681,7 @@ void loop() {
     if (DRDY_PULSE_MODE) {
       drdyReleaseAtUs = micros() + DRDY_PULSE_US;
     }
-    esp_err_t err = spi_slave_transmit(SPI_SLAVE_HOST, &spiTransactions[0], pdMS_TO_TICKS(2));
+    esp_err_t err = spi_slave_transmit(SPI_SLAVE_HOST, &spiTransactions[0], portMAX_DELAY);
     if (!DRDY_PULSE_MODE) {
       gpio_set_level((gpio_num_t)DRDY_PIN, drdyInactiveLevel());
       stats.drdyAsserted = false;
