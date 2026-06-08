@@ -76,6 +76,7 @@ static SPIClass adsSpi(VSPI);
 static SPISettings adsSpiSettings(SPI_HZ, MSBFIRST, SPI_MODE0);
 
 static uint8_t rxFrame[FRAME_BYTES];
+static uint8_t txZeros[FRAME_BYTES];
 static int32_t chRaw[NUM_CHANNELS];
 static float chNorm[NUM_CHANNELS];
 static Measurements meas;
@@ -157,9 +158,7 @@ static void configureFieldPwm() {
 static bool readAdsFrame() {
   digitalWrite(PIN_ADS_CS, LOW);
   adsSpi.beginTransaction(adsSpiSettings);
-  for (uint16_t i = 0; i < FRAME_BYTES; i++) {
-    rxFrame[i] = adsSpi.transfer(0x00);
-  }
+  adsSpi.transferBytes(txZeros, rxFrame, FRAME_BYTES);
   adsSpi.endTransaction();
   digitalWrite(PIN_ADS_CS, HIGH);
 
