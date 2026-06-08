@@ -188,7 +188,10 @@ static void sampleAdsIfReady() {
   }
   interrupts();
 
-  if (!hasPending) return;
+  if (!hasPending) {
+    if (digitalRead(PIN_ADS_DRDY) == HIGH) return;
+    hasPending = true;
+  }
 
   const uint32_t nowReadUs = micros();
   if ((uint32_t)(nowReadUs - lastAdsReadUs) < MIN_ADS_READ_INTERVAL_US) return;
