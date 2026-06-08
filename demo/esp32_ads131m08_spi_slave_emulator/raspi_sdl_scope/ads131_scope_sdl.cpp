@@ -640,58 +640,53 @@ void drawRect(SDL_Renderer *r, SDL_Rect rect, Color color) {
 }
 
 struct RenderCache {
-  SDL_Texture *grid = nullptr;
   SDL_Rect grid_area{0, 0, 0, 0};
   bool grid_valid = false;
+  std::array<float, 51> grid_x{};
+  std::array<float, 41> grid_y{};
 };
 
 void destroyCache(RenderCache *cache) {
-  if (cache->grid) SDL_DestroyTexture(cache->grid);
-  cache->grid = nullptr;
   cache->grid_valid = false;
 }
 
-void buildGridTexture(SDL_Renderer *r, RenderCache *cache, SDL_Rect area) {
-  if (cache->grid_valid && cache->grid && cache->grid_area.x == area.x &&
+void buildGridCache(RenderCache *cache, SDL_Rect area) {
+  if (cache->grid_valid && cache->grid_area.x == area.x &&
       cache->grid_area.y == area.y && cache->grid_area.w == area.w &&
       cache->grid_area.h == area.h) {
     return;
   }
 
-  destroyCache(cache);
   cache->grid_area = area;
-  cache->grid = SDL_CreateTexture(r, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
-                                  std::max(1, area.w), std::max(1, area.h));
-  if (!cache->grid) return;
-  SDL_SetTextureBlendMode(cache->grid, SDL_BLENDMODE_BLEND);
-  SDL_SetRenderTarget(r, cache->grid);
-  fillRect(r, SDL_Rect{0, 0, area.w, area.h}, {0, 0, 0, 0});
-
-  SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
   for (int x = 0; x <= 50; ++x) {
-    float px = area.w * (x / 50.0f);
-    const bool major = x % 5 == 0;
-    const bool center = x == 25;
-    setColor(r, center ? Color{100, 120, 126, 125}
-                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
-    line(r, px, 0, px, area.h);
+    cache->grid_x[x] = area.x + area.w * (x / 50.0f);
   }
   for (int y = 0; y <= 40; ++y) {
-    float py = area.h * (y / 40.0f);
-    const bool major = y % 5 == 0;
-    const bool center = y == 20;
-    setColor(r, center ? Color{100, 120, 126, 125}
-                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
-    line(r, 0, py, area.w, py);
+    cache->grid_y[y] = area.y + area.h * (y / 40.0f);
   }
-  SDL_SetRenderTarget(r, nullptr);
   cache->grid_valid = true;
 }
 
 void drawGrid(SDL_Renderer *r, RenderCache *cache, SDL_Rect area, bool show_grid) {
   if (!show_grid) return;
-  buildGridTexture(r, cache, area);
-  if (cache->grid) SDL_RenderCopy(r, cache->grid, nullptr, &area);
+  buildGridCache(cache, area);
+  SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+  for (int x = 0; x <= 50; ++x) {
+    float px = cache->grid_x[x];
+    const bool major = x % 5 == 0;
+    const bool center = x == 25;
+    setColor(r, center ? Color{100, 120, 126, 125}
+                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
+    line(r, px, area.y, px, area.y + area.h);
+  }
+  for (int y = 0; y <= 40; ++y) {
+    float py = cache->grid_y[y];
+    const bool major = y % 5 == 0;
+    const bool center = y == 20;
+    setColor(r, center ? Color{100, 120, 126, 125}
+                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
+    line(r, area.x, py, area.x + area.w, py);
+  }
 }
 
 SDL_Rect plotForChannel(SDL_Rect plot, int channel, int mode) {
@@ -1008,7 +1003,7 @@ void renderThread(const Args args, ScopeState *state,
   if (args.fullscreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
   SDL_Window *window = SDL_CreateWindow("ADS131M08 Instrument Scope", SDL_WINDOWPOS_CENTERED,
                                        SDL_WINDOWPOS_CENTERED, 1280, 720, flags);
-  uint32_t renderer_flags = SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE;
+  uint32_t renderer_flags = SDL_RENDERER_ACCELERATED;
   if (args.vsync) renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
   SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, renderer_flags);
   if (!window || !renderer) {
