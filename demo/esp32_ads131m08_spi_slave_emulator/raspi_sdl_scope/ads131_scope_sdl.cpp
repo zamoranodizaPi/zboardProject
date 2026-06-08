@@ -181,7 +181,10 @@ int openSerial(const std::string &path, int baud = 115200) {
   tty.c_cflag &= ~PARENB;
   tty.c_cflag &= ~CSIZE;
   tty.c_cflag |= CS8;
+  tty.c_cflag &= ~HUPCL;
   tcsetattr(fd, TCSANOW, &tty);
+  int modem = TIOCM_DTR | TIOCM_RTS;
+  ioctl(fd, TIOCMBIC, &modem);
   return fd;
 }
 
@@ -194,13 +197,19 @@ void serialCommand(int fd, const std::string &cmd) {
 }
 
 void configureEsp32(int fd, const Args &args) {
-  serialCommand(fd, "BITS " + std::to_string(args.word_bits));
-  serialCommand(fd, "RATE " + std::to_string(args.sample_rate));
-  serialCommand(fd, "SPI " + std::to_string(args.spi_hz));
-  serialCommand(fd, "SPIMODE " + std::to_string(args.spi_mode));
-  serialCommand(fd, std::string("CRC ") + (args.crc ? "ON" : "OFF"));
-  serialCommand(fd, "MODE SINE");
-  serialCommand(fd, "START");
+  if (fd < 0) return;
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  tcflush(fd, TCIOFLUSH);
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    serialCommand(fd, "BITS " + std::to_string(args.word_bits));
+    serialCommand(fd, "RATE " + std::to_string(args.sample_rate));
+    serialCommand(fd, "SPI " + std::to_string(args.spi_hz));
+    serialCommand(fd, "SPIMODE " + std::to_string(args.spi_mode));
+    serialCommand(fd, std::string("CRC ") + (args.crc ? "ON" : "OFF"));
+    serialCommand(fd, "MODE SINE");
+    serialCommand(fd, "START");
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  }
 }
 
 int openSpi(const Args &args) {
