@@ -38,7 +38,7 @@ static const uint16_t FRAME_BYTES = (1 + NUM_CHANNELS) * WORD_BYTES;
 static const uint32_t SPI_HZ = 10000000;
 static const uint32_t NOMINAL_SAMPLE_RATE = 4000;
 static const uint32_t TELEMETRY_MS = 100;
-static const uint32_t MIN_ADS_READ_INTERVAL_US = 180;
+static const uint32_t MIN_ADS_READ_INTERVAL_US = 245;
 static const uint32_t SYNC_PULSE_US = 800;
 static const uint32_t FIELD_PWM_HZ = 20000;
 static const uint8_t FIELD_PWM_BITS = 10;
@@ -95,6 +95,7 @@ static uint32_t lastStatsMs = 0;
 static uint32_t syncPulseReleaseUs = 0;
 static uint32_t framesRead = 0;
 static uint32_t badFrames = 0;
+static uint32_t lastBadFramesControl = 0;
 static uint32_t lastFramesRead = 0;
 static float fps = 0.0f;
 
@@ -239,7 +240,9 @@ static void updateMotorControl() {
     meas.field_duty = clampf(manualFieldDuty, 0.0f, 0.95f);
   }
 
-  fault = meas.v_unbalance > 8.0f || badFrames > 1000;
+  const uint32_t recentBadFrames = badFrames - lastBadFramesControl;
+  lastBadFramesControl = badFrames;
+  fault = meas.v_unbalance > 8.0f || recentBadFrames > 10;
   digitalWrite(PIN_FAULT, fault ? HIGH : LOW);
   digitalWrite(PIN_MOTOR_RUN, (motorRun && !fault) ? HIGH : LOW);
   writeFieldPwm((motorRun && !fault) ? meas.field_duty : 0.0f);
