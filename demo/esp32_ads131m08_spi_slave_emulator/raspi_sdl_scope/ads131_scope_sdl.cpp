@@ -414,17 +414,18 @@ uint64_t findTriggerStart(const Args &args, ScopeState *state, const std::vector
   *triggered = false;
   if (latest < 4) return latest > count ? latest - count : 0;
 
-  const uint64_t scan_begin = latest > std::min<uint64_t>(count * 2, kRingSize - 2)
-                                  ? latest - std::min<uint64_t>(count * 2, kRingSize - 2)
-                                  : 1;
-  for (uint64_t seq = latest - 1; seq > scan_begin; --seq) {
+  const uint64_t pre = count / 4;
+  const uint64_t post = count - pre;
+  const uint64_t scan_from = latest > post ? latest - post : 1;
+  const uint64_t scan_span = std::min<uint64_t>(count, kRingSize - 2);
+  const uint64_t scan_begin = scan_from > scan_span ? scan_from - scan_span : 1;
+  for (uint64_t seq = scan_from; seq > scan_begin; --seq) {
     const Sample &a = ring[(seq - 1) & (kRingSize - 1)];
     const Sample &b = ring[seq & (kRingSize - 1)];
     bool crossed = rising ? (a.ch[ch] < level && b.ch[ch] >= level)
                           : (a.ch[ch] > level && b.ch[ch] <= level);
     if (crossed) {
       *triggered = true;
-      uint64_t pre = count / 4;
       return seq > pre ? seq - pre : 0;
     }
   }
