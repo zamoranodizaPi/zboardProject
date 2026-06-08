@@ -1213,6 +1213,12 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   if (redraw_overlay) {
     drawTopBar(r, args, state, frame, render_fps, w);
     drawSidePanel(r, args, state, SDL_Rect{w - panel_w + 8, 74, std::max(0, panel_w - 18), h - 150});
+    SDL_Rect panel_tab{w - 46, 74, 38, 72};
+    fillRect(r, panel_tab, state->panel_open.load() ? Color{12, 19, 21, 235} : Color{20, 30, 34, 245});
+    drawRect(r, panel_tab, {64, 82, 86, 190});
+    drawText(r, panel_tab.x + 11, panel_tab.y + 9, state->panel_open.load() ? ">" : "<",
+             {150, 178, 176, 220}, 2);
+    drawText(r, panel_tab.x + 9, panel_tab.y + 42, "P", {98, 118, 120, 180}, 1);
     drawBottomBar(r, args, state, frame, w, h);
     if (state->perf_overlay.load()) drawPerfOverlay(r, state, render_fps, w);
   }
@@ -1223,6 +1229,138 @@ struct InteractionState {
   int last_x = 0;
   int last_y = 0;
 };
+
+void autoscaleFromFrame(ScopeState *state, const DisplayFrame &frame, int channels);
+
+bool pointInRect(int x, int y, SDL_Rect rect) {
+  return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+}
+
+void armTrigger(ScopeState *state) {
+  state->trigger_state = TRIG_ARMED;
+}
+
+void selectChannel(ScopeState *state, const Args &args, int ch) {
+  if (ch < 0 || ch >= args.channels) return;
+  state->selected_channel = ch;
+  state->trigger_channel = std::min(ch, 3);
+  if (!state->show_channel[ch].load()) state->show_channel[ch] = true;
+}
+
+bool handleTouchButton(int x, int y, ScopeState *state, const Args &args,
+                       const DisplayFrame &frame) {
+  const int panel_w = state->panel_open.load() ? 250 : 0;
+
+  SDL_Rect run{18, 14, 78, 28};
+  if (pointInRect(x, y, run)) {
+    state->capture = !state->capture.load();
+    return true;
+  }
+
+  SDL_Rect trig{112, 14, 124, 28};
+  if (pointInRect(x, y, trig)) {
+    state->trigger_mode = (state->trigger_mode.load() + 1) % 4;
+    armTrigger(state);
+    return true;
+  }
+
+  SDL_Rect fs{270, 8, 165, 44};
+  SDL_Rect time{448, 8, 178, 44};
+  SDL_Rect volts{636, 8, 168, 44};
+  SDL_Rect fps{958, 8, 130, 44};
+  if (pointInRect(x, y, fs)) {
+    state->perf_overlay = !state->perf_overlay.load();
+    return true;
+  }
+  if (pointInRect(x, y, time)) {
+    state->time_per_div = std::clamp(state->time_per_div.load() * 0.8f, 0.001f, 0.1f);
+    return true;
+  }
+  if (pointInRect(x, y, volts)) {
+    autoscaleFromFrame(state, frame, args.channels);
+    return true;
+  }
+  if (pointInRect(x, y, fps)) {
+    state->show_grid = !state->show_grid.load();
+    return true;
+  }
+
+  int w = 0, h = 0;
+  SDL_Window *window = SDL_GetMouseFocus();
+  if (window) SDL_GetWindowSize(window, &w, &h);
+  if (w <= 0 || h <= 0) return false;
+
+  SDL_Rect panel_tab{w - 46, 74, 38, 72};
+  if (pointInRect(x, y, panel_tab)) {
+    state->panel_open = !state->panel_open.load();
+    return true;
+  }
+
+  if (state->panel_open.load()) {
+    SDL_Rect panel{w - panel_w + 8, 74, std::max(0, panel_w - 18), h - 150};
+    if (pointInRect(x, y, panel)) {
+      int row_y = panel.y + 42;
+      for (int ch = 0; ch < args.channels; ++ch) {
+        SDL_Rect row{panel.x + 8, row_y - 6, panel.w - 16, 20};
+        if (pointInRect(x, y, row)) {
+          if (state->selected_channel.load() == ch) {
+            state->show_channel[ch] = !state->show_channel[ch].load();
+          } else {
+            selectChannel(state, args, ch);
+          }
+          return true;
+        }
+        row_y += 20;
+      }
+
+      int trigger_y = panel.y + 42 + args.channels * 20 + 16 + 22;
+      SDL_Rect mode_row{panel.x + 8, trigger_y - 5, panel.w - 16, 18};
+      SDL_Rect source_row{panel.x + 8, trigger_y + 13, panel.w - 16, 18};
+      SDL_Rect edge_row{panel.x + 8, trigger_y + 31, panel.w - 16, 18};
+      SDL_Rect level_down{panel.x + 8, trigger_y + 49, (panel.w - 16) / 2, 18};
+      SDL_Rect level_up{panel.x + 8 + (panel.w - 16) / 2, trigger_y + 49, (panel.w - 16) / 2, 18};
+      if (pointInRect(x, y, mode_row)) {
+        state->trigger_mode = (state->trigger_mode.load() + 1) % 4;
+        armTrigger(state);
+        return true;
+      }
+      if (pointInRect(x, y, source_row)) {
+        state->trigger_channel = (state->trigger_channel.load() + 1) % std::min(args.channels, 4);
+        return true;
+      }
+      if (pointInRect(x, y, edge_row)) {
+        state->trigger_rising = !state->trigger_rising.load();
+        armTrigger(state);
+        return true;
+      }
+      if (pointInRect(x, y, level_down)) {
+        state->trigger_level = std::clamp(state->trigger_level.load() - 0.05f, -1.0f, 1.0f);
+        armTrigger(state);
+        return true;
+      }
+      if (pointInRect(x, y, level_up)) {
+        state->trigger_level = std::clamp(state->trigger_level.load() + 0.05f, -1.0f, 1.0f);
+        armTrigger(state);
+        return true;
+      }
+
+      SDL_Rect view_row{panel.x + 8, panel.y + panel.h - 44, panel.w - 16, 30};
+      if (pointInRect(x, y, view_row)) {
+        state->view_mode = (state->view_mode.load() + 1) % 3;
+        return true;
+      }
+    }
+  }
+
+  SDL_Rect ch_card{18, h - 48, 104, 30};
+  if (pointInRect(x, y, ch_card)) {
+    const int next = (state->selected_channel.load() + 1) % args.channels;
+    selectChannel(state, args, next);
+    return true;
+  }
+
+  return false;
+}
 
 void autoscaleFromFrame(ScopeState *state, const DisplayFrame &frame, int channels) {
   float peak = 0.05f;
@@ -1245,6 +1383,10 @@ void handleEvent(const SDL_Event &event, ScopeState *state, const Args &args,
   }
   if (event.type == SDL_MOUSEBUTTONDOWN) {
     if (event.button.button == SDL_BUTTON_LEFT) {
+      if (handleTouchButton(event.button.x, event.button.y, state, args, frame)) {
+        interaction->dragging = false;
+        return;
+      }
       if (event.button.clicks >= 2) {
         autoscaleFromFrame(state, frame, args.channels);
       } else {
@@ -1314,6 +1456,8 @@ void handleEvent(const SDL_Event &event, ScopeState *state, const Args &args,
 void renderThread(const Args args, ScopeState *state,
                   const std::array<DisplayFrame, kDisplayBuffers> *display) {
   pinThreadToCpu(3);
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
+  SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "1");
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
     state->running = false;
     return;
