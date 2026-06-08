@@ -366,15 +366,6 @@ static const spi_host_device_t SPI_SLAVE_HOST = SPI2_HOST;
 static const spi_host_device_t SPI_SLAVE_HOST = HSPI_HOST;
 #endif
 
-static void IRAM_ATTR onSpiPostTransaction(spi_slave_transaction_t *trans) {
-  (void)trans;
-  stats.framesSent++;
-  if (!DRDY_PULSE_MODE) {
-    gpio_set_level((gpio_num_t)DRDY_PIN, drdyInactiveLevel());
-    stats.drdyAsserted = false;
-  }
-}
-
 static void freeSpi() {
   if (spiStarted) {
     spi_slave_free(SPI_SLAVE_HOST);
@@ -382,17 +373,12 @@ static void freeSpi() {
   }
 }
 
-static bool queueSpiBuffer(uint8_t index) {
+static void prepareSpiBuffer(uint8_t index) {
   memset(&spiTransactions[index], 0, sizeof(spiTransactions[index]));
   memcpy(txBuffers[index], currentFrame, currentFrameBytes);
   spiTransactions[index].length = (size_t)currentFrameBytes * 8;
   spiTransactions[index].tx_buffer = txBuffers[index];
   spiTransactions[index].rx_buffer = rxBuffers[index];
-  esp_err_t err = spi_slave_queue_trans(SPI_SLAVE_HOST, &spiTransactions[index], 0);
-  if (err == ESP_OK) {
-    spiTransactionInFlight = true;
-  }
-  return err == ESP_OK;
 }
 
 static bool startSpi() {
@@ -411,7 +397,6 @@ static bool startSpi() {
   slaveConfig.spics_io_num = PIN_SPI_CS;
   slaveConfig.queue_size = SPI_QUEUE_DEPTH;
   slaveConfig.flags = 0;
-  slaveConfig.post_trans_cb = onSpiPostTransaction;
 
   esp_err_t err = spi_slave_initialize(SPI_SLAVE_HOST, &busConfig, &slaveConfig, SPI_DMA_CH_AUTO);
   if (err != ESP_OK) {
@@ -423,22 +408,6 @@ static bool startSpi() {
   spiTransactionInFlight = false;
   spiStarted = true;
   return true;
-}
-
-static void serviceSpi() {
-  if (!spiStarted) return;
-
-  spi_slave_transaction_t *done = nullptr;
-  while (spi_slave_get_trans_result(SPI_SLAVE_HOST, &done, 0) == ESP_OK && done) {
-    stats.spiFrames++;
-    for (uint8_t i = 0; i < SPI_QUEUE_DEPTH; i++) {
-      if (done == &spiTransactions[i]) {
-        spiTransactionInFlight = false;
-        break;
-      }
-    }
-    done = nullptr;
-  }
 }
 
 // -------------------------- RUNTIME CONTROL ---------------------------
@@ -469,16 +438,9 @@ static void initializeChannels(SignalMode mode) {
 
 static void startStreaming() {
   stats.running = true;
-  stats.sampleDue = false;
+  stats.sampleDue = true;
   stats.drdyAsserted = false;
   digitalWrite(DRDY_PIN, drdyInactiveLevel());
-  if (spiStarted && !spiTransactionInFlight) {
-    buildFrame();
-    if (queueSpiBuffer(0)) {
-      stats.drdyAsserted = true;
-      gpio_set_level((gpio_num_t)DRDY_PIN, drdyActiveLevel());
-    }
-  }
   Serial.println(F("Streaming START"));
 }
 
@@ -500,6 +462,7 @@ static bool setBits(uint8_t bits) {
 
 static bool setSampleRate(uint32_t rate) {
   if (rate < 1000 || rate > 32000) return false;
+  if (rate == SAMPLE_RATE) return true;
   SAMPLE_RATE = rate;
   updateChannelPhaseSteps();
   configureSampleTimer();
@@ -705,19 +668,28 @@ void setup() {
 void loop() {
   serviceSerial();
   serviceDrdyPulse();
-  serviceSpi();
 
   if (stats.sampleDue && !stats.drdyAsserted && !spiTransactionInFlight) {
     portENTER_CRITICAL(&timerMux);
     stats.sampleDue = false;
     portEXIT_CRITICAL(&timerMux);
     buildFrame();
-    if (queueSpiBuffer(0)) {
-      stats.drdyAsserted = true;
-      gpio_set_level((gpio_num_t)DRDY_PIN, drdyActiveLevel());
-      if (DRDY_PULSE_MODE) {
-        drdyReleaseAtUs = micros() + DRDY_PULSE_US;
-      }
+    prepareSpiBuffer(0);
+    spiTransactionInFlight = true;
+    stats.drdyAsserted = true;
+    gpio_set_level((gpio_num_t)DRDY_PIN, drdyActiveLevel());
+    if (DRDY_PULSE_MODE) {
+      drdyReleaseAtUs = micros() + DRDY_PULSE_US;
+    }
+    esp_err_t err = spi_slave_transmit(SPI_SLAVE_HOST, &spiTransactions[0], pdMS_TO_TICKS(2));
+    if (!DRDY_PULSE_MODE) {
+      gpio_set_level((gpio_num_t)DRDY_PIN, drdyInactiveLevel());
+      stats.drdyAsserted = false;
+    }
+    spiTransactionInFlight = false;
+    if (err == ESP_OK) {
+      stats.framesSent++;
+      stats.spiFrames++;
     } else {
       stats.overruns++;
     }
