@@ -304,12 +304,16 @@ int openDrdyGpio(int gpio) {
 
 bool waitForDrdy(int fd, int timeout_ms) {
   if (fd < 0) return false;
+  char c;
+  ::lseek(fd, 0, SEEK_SET);
+  if (::read(fd, &c, 1) == 1 && c == '0') {
+    return true;
+  }
   pollfd pfd{};
   pfd.fd = fd;
   pfd.events = POLLPRI | POLLERR;
   int rc = ::poll(&pfd, 1, timeout_ms);
   if (rc <= 0) return false;
-  char c;
   ::lseek(fd, 0, SEEK_SET);
   ::read(fd, &c, 1);
   return true;
