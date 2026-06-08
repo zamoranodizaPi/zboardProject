@@ -6,9 +6,11 @@ SRC := ads131_scope_sdl.cpp
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
 SDL_LIBS := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+GPIOD_CFLAGS := $(shell $(PKG_CONFIG) --cflags libgpiod 2>/dev/null)
+GPIOD_LIBS := $(shell $(PKG_CONFIG) --libs libgpiod 2>/dev/null)
 
-CXXFLAGS ?= -O3 -pipe -Wall -Wextra -std=c++17 -pthread $(SDL_CFLAGS)
-LDFLAGS ?= -pthread $(SDL_LIBS) -latomic
+CXXFLAGS ?= -O3 -pipe -Wall -Wextra -std=c++17 -pthread $(SDL_CFLAGS) $(GPIOD_CFLAGS)
+LDFLAGS ?= -pthread $(SDL_LIBS) $(GPIOD_LIBS) -latomic
 
 .PHONY: all clean install-service
 

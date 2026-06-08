@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <fcntl.h>
+#include <gpiod.h>
 #include <linux/spi/spidev.h>
 #include <poll.h>
 #include <pthread.h>
@@ -140,6 +141,14 @@ struct DisplayFrame {
   bool valid = false;
   std::array<Measurements, kMaxChannels> measurements{};
   std::vector<Sample> samples;
+};
+
+struct DrdyLine {
+  bool available = false;
+  bool using_gpiod = false;
+  int sysfs_fd = -1;
+  gpiod_chip *chip = nullptr;
+  gpiod_line *line = nullptr;
 };
 
 int32_t signExtend(uint32_t value, int bits) {
@@ -383,6 +392,75 @@ bool waitForDrdyActive(int fd, int timeout_ms) {
   return readGpioValue(fd) == 0;
 }
 
+void closeDrdyLine(DrdyLine *drdy) {
+  if (!drdy) return;
+  if (drdy->line) {
+    gpiod_line_release(drdy->line);
+    drdy->line = nullptr;
+  }
+  if (drdy->chip) {
+    gpiod_chip_close(drdy->chip);
+    drdy->chip = nullptr;
+  }
+  if (drdy->sysfs_fd >= 0) {
+    ::close(drdy->sysfs_fd);
+    drdy->sysfs_fd = -1;
+  }
+  drdy->available = false;
+  drdy->using_gpiod = false;
+}
+
+DrdyLine openDrdyLine(int bcm_gpio) {
+  DrdyLine drdy;
+  if (bcm_gpio < 0) return drdy;
+
+  const int sysfs_gpio = resolveSysfsGpio(bcm_gpio);
+  if (std::filesystem::exists("/sys/class/gpio/gpio" + std::to_string(sysfs_gpio) + "/value")) {
+    writeTextFile("/sys/class/gpio/unexport", std::to_string(sysfs_gpio));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  drdy.chip = gpiod_chip_open_by_name("gpiochip0");
+  if (!drdy.chip) drdy.chip = gpiod_chip_open("/dev/gpiochip0");
+  if (drdy.chip) {
+    drdy.line = gpiod_chip_get_line(drdy.chip, static_cast<unsigned int>(bcm_gpio));
+    if (drdy.line &&
+        gpiod_line_request_falling_edge_events(drdy.line, "ads131_scope_sdl") == 0) {
+      drdy.available = true;
+      drdy.using_gpiod = true;
+      return drdy;
+    }
+    closeDrdyLine(&drdy);
+  }
+
+  drdy.sysfs_fd = openDrdyGpio(bcm_gpio);
+  drdy.available = drdy.sysfs_fd >= 0;
+  drdy.using_gpiod = false;
+  return drdy;
+}
+
+bool waitForDrdyLine(DrdyLine *drdy, int timeout_ms) {
+  if (!drdy || !drdy->available) return false;
+  if (!drdy->using_gpiod) return waitForDrdyActive(drdy->sysfs_fd, timeout_ms);
+
+  const int value = gpiod_line_get_value(drdy->line);
+  if (value == 0) return true;
+
+  timespec ts{};
+  ts.tv_sec = timeout_ms / 1000;
+  ts.tv_nsec = static_cast<long>(timeout_ms % 1000) * 1000000L;
+  int rc = gpiod_line_event_wait(drdy->line, &ts);
+  if (rc <= 0) return false;
+
+  gpiod_line_event event{};
+  while (gpiod_line_event_read(drdy->line, &event) == 0) {
+    if (event.event_type == GPIOD_LINE_EVENT_FALLING_EDGE) return true;
+    timespec zero{};
+    if (gpiod_line_event_wait(drdy->line, &zero) <= 0) break;
+  }
+  return gpiod_line_get_value(drdy->line) == 0;
+}
+
 void pinThreadToCpu(int cpu) {
   cpu_set_t set;
   CPU_ZERO(&set);
@@ -400,8 +478,13 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
   const size_t frame_bytes =
       static_cast<size_t>(1 + args.channels + (args.crc ? 1 : 0)) * (args.word_bits / 8);
   std::vector<uint8_t> tx(frame_bytes, 0), rx(frame_bytes, 0);
-  int drdy = openDrdyGpio(args.drdy_gpio);
-  std::cerr << (drdy >= 0 ? "DRDY sync enabled\n" : "DRDY unavailable, timed polling fallback\n");
+  DrdyLine drdy = openDrdyLine(args.drdy_gpio);
+  if (drdy.available) {
+    std::cerr << (drdy.using_gpiod ? "DRDY sync enabled via libgpiod\n"
+                                   : "DRDY sync enabled via sysfs fallback\n");
+  } else {
+    std::cerr << "DRDY unavailable, timed polling fallback\n";
+  }
   auto next = std::chrono::steady_clock::now();
 
   while (state->running.load(std::memory_order_relaxed)) {
@@ -412,8 +495,8 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       continue;
     }
 
-    if (drdy >= 0) {
-      if (!waitForDrdyActive(drdy, 100)) {
+    if (drdy.available) {
+      if (!waitForDrdyLine(&drdy, 100)) {
         state->overruns.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
@@ -429,7 +512,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       state->errors.fetch_add(1, std::memory_order_relaxed);
     }
 
-    if (drdy < 0) {
+    if (!drdy.available) {
       next += std::chrono::microseconds(1000000 / std::max(1, args.sample_rate));
       std::this_thread::sleep_until(next);
       if (std::chrono::steady_clock::now() > next + std::chrono::milliseconds(50)) {
@@ -442,7 +525,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
         static_cast<float>(std::chrono::duration<double, std::milli>(loop_end - loop_start).count()),
         std::memory_order_relaxed);
   }
-  if (drdy >= 0) ::close(drdy);
+  closeDrdyLine(&drdy);
   ::close(spi);
 }
 
