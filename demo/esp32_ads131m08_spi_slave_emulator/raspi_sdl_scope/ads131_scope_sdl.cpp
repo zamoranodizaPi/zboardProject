@@ -450,19 +450,26 @@ bool waitForDrdyLine(DrdyLine *drdy, int timeout_ms) {
     if (gpiod_line_get_value(drdy->line) == 0) return true;
   }
 
-  timespec ts{};
-  ts.tv_sec = timeout_ms / 1000;
-  ts.tv_nsec = static_cast<long>(timeout_ms % 1000) * 1000000L;
-  int rc = gpiod_line_event_wait(drdy->line, &ts);
-  if (rc <= 0) return false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    const auto remaining_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(remaining);
+    timespec ts{};
+    ts.tv_sec = static_cast<time_t>(remaining_ns.count() / 1000000000LL);
+    ts.tv_nsec = static_cast<long>(remaining_ns.count() % 1000000000LL);
+    int rc = gpiod_line_event_wait(drdy->line, &ts);
+    if (rc <= 0) return false;
 
-  gpiod_line_event event{};
-  while (gpiod_line_event_read(drdy->line, &event) == 0) {
-    if (event.event_type == GPIOD_LINE_EVENT_FALLING_EDGE) return true;
-    timespec zero{};
-    if (gpiod_line_event_wait(drdy->line, &zero) <= 0) break;
+    gpiod_line_event event{};
+    bool saw_falling = false;
+    while (gpiod_line_event_read(drdy->line, &event) == 0) {
+      saw_falling = saw_falling || event.event_type == GPIOD_LINE_EVENT_FALLING_EDGE;
+      timespec zero{};
+      if (gpiod_line_event_wait(drdy->line, &zero) <= 0) break;
+    }
+    if (saw_falling && gpiod_line_get_value(drdy->line) == 0) return true;
   }
-  return gpiod_line_get_value(drdy->line) == 0;
+  return false;
 }
 
 void pinThreadToCpu(int cpu) {
