@@ -444,14 +444,14 @@ static void startStreaming() {
   Serial.println(F("Streaming START"));
 }
 
-static void syncPhaseToVaZeroCrossing() {
+static void syncPhaseToVaZeroCrossing(bool report) {
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
     channels[ch].phase = 0u - channels[ch].phaseStep;
     channels[ch].counter = 0;
   }
   frameSequence = 0;
   stats.sampleDue = true;
-  Serial.println(F("SYNC VA zero-cross"));
+  if (report) Serial.println(F("SYNC VA zero-cross"));
 }
 
 static void stopStreaming() {
@@ -615,9 +615,11 @@ static void handleCommand(char *line) {
   } else if (!strcasecmp(cmd, "START")) {
     startStreaming();
   } else if (!strcasecmp(cmd, "SYNC")) {
-    syncPhaseToVaZeroCrossing();
+    syncPhaseToVaZeroCrossing(true);
+  } else if (!strcasecmp(cmd, "SYNCSILENT")) {
+    syncPhaseToVaZeroCrossing(false);
   } else if (!strcasecmp(cmd, "SYNCSTART")) {
-    syncPhaseToVaZeroCrossing();
+    syncPhaseToVaZeroCrossing(true);
     startStreaming();
   } else if (!strcasecmp(cmd, "STOP")) {
     stopStreaming();
