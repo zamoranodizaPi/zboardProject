@@ -444,6 +444,16 @@ static void startStreaming() {
   Serial.println(F("Streaming START"));
 }
 
+static void syncPhaseToVaZeroCrossing() {
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+    channels[ch].phase = 0u - channels[ch].phaseStep;
+    channels[ch].counter = 0;
+  }
+  frameSequence = 0;
+  stats.sampleDue = true;
+  Serial.println(F("SYNC VA zero-cross"));
+}
+
 static void stopStreaming() {
   stats.running = false;
   stats.sampleDue = false;
@@ -603,6 +613,11 @@ static void handleCommand(char *line) {
       Serial.println(F("ERR CH expects: CH <0..7> <MODE> [value]"));
     }
   } else if (!strcasecmp(cmd, "START")) {
+    startStreaming();
+  } else if (!strcasecmp(cmd, "SYNC")) {
+    syncPhaseToVaZeroCrossing();
+  } else if (!strcasecmp(cmd, "SYNCSTART")) {
+    syncPhaseToVaZeroCrossing();
     startStreaming();
   } else if (!strcasecmp(cmd, "STOP")) {
     stopStreaming();

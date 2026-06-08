@@ -196,10 +196,20 @@ void serialCommand(int fd, const std::string &cmd) {
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
 }
 
+void waitForNextWallSecond() {
+  using clock = std::chrono::system_clock;
+  auto next = std::chrono::time_point_cast<std::chrono::seconds>(clock::now()) + std::chrono::seconds(1);
+  std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
+  while (clock::now() < next) {
+    std::this_thread::yield();
+  }
+}
+
 void configureEsp32(int fd, const Args &args) {
   if (fd < 0) return;
   std::this_thread::sleep_for(std::chrono::milliseconds(1500));
   tcflush(fd, TCIOFLUSH);
+  serialCommand(fd, "STOP");
   for (int attempt = 0; attempt < 2; ++attempt) {
     serialCommand(fd, "BITS " + std::to_string(args.word_bits));
     serialCommand(fd, "RATE " + std::to_string(args.sample_rate));
@@ -207,9 +217,10 @@ void configureEsp32(int fd, const Args &args) {
     serialCommand(fd, "SPIMODE " + std::to_string(args.spi_mode));
     serialCommand(fd, std::string("CRC ") + (args.crc ? "ON" : "OFF"));
     serialCommand(fd, "MODE SINE");
-    serialCommand(fd, "START");
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
   }
+  waitForNextWallSecond();
+  serialCommand(fd, "SYNCSTART");
 }
 
 int openSpi(const Args &args) {
