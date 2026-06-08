@@ -146,6 +146,7 @@ struct DisplayFrame {
 struct DrdyLine {
   bool available = false;
   bool using_gpiod = false;
+  bool allow_initial_low = false;
   int sysfs_fd = -1;
   gpiod_chip *chip = nullptr;
   gpiod_line *line = nullptr;
@@ -428,6 +429,7 @@ DrdyLine openDrdyLine(int bcm_gpio) {
         gpiod_line_request_falling_edge_events(drdy.line, "ads131_scope_sdl") == 0) {
       drdy.available = true;
       drdy.using_gpiod = true;
+      drdy.allow_initial_low = true;
       return drdy;
     }
     closeDrdyLine(&drdy);
@@ -442,6 +444,11 @@ DrdyLine openDrdyLine(int bcm_gpio) {
 bool waitForDrdyLine(DrdyLine *drdy, int timeout_ms) {
   if (!drdy || !drdy->available) return false;
   if (!drdy->using_gpiod) return waitForDrdyActive(drdy->sysfs_fd, timeout_ms);
+
+  if (drdy->allow_initial_low) {
+    drdy->allow_initial_low = false;
+    if (gpiod_line_get_value(drdy->line) == 0) return true;
+  }
 
   timespec ts{};
   ts.tv_sec = timeout_ms / 1000;
