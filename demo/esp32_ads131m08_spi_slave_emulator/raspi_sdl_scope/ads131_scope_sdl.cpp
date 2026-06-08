@@ -63,7 +63,7 @@ struct Args {
   int drdy_gpio = 4;
   bool crc = false;
   bool fullscreen = true;
-  bool phosphor = true;
+  bool phosphor = false;
   bool vsync = false;
 };
 
@@ -115,7 +115,7 @@ struct ScopeState {
   std::atomic<int> front_display{0};
   std::atomic<int> trigger_channel{0};
   std::atomic<bool> trigger_rising{true};
-  std::atomic<int> trigger_mode{TRIG_AUTO};
+  std::atomic<int> trigger_mode{TRIG_NORMAL};
   std::atomic<int> trigger_state{TRIG_ARMED};
   std::atomic<float> trigger_level{0.0f};
   std::atomic<float> trigger_hysteresis{0.005f};
@@ -137,6 +137,7 @@ struct DisplayFrame {
   uint64_t end_seq = 0;
   size_t trigger_index = 0;
   bool triggered = false;
+  bool valid = false;
   std::array<Measurements, kMaxChannels> measurements{};
   std::vector<Sample> samples;
 };
@@ -592,7 +593,9 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
           state->trigger_state = TRIG_HIT;
         } else if (mode == TRIG_AUTO) {
           const auto now = std::chrono::steady_clock::now();
-          if (std::chrono::duration<double>(now - last_auto).count() > 0.20) {
+          const int front = state->front_display.load(std::memory_order_acquire);
+          const bool have_display = (*display)[front].valid;
+          if (!have_display && std::chrono::duration<double>(now - last_auto).count() > 0.20) {
             publish = true;
             trigger_seq = newest_triggerable;
             last_auto = now;
@@ -613,6 +616,7 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
         dst.end_seq = start + count - 1;
         dst.trigger_index = static_cast<size_t>(pre);
         dst.triggered = triggered;
+        dst.valid = true;
         for (size_t i = 0; i < count; ++i) {
           dst.samples[i] = (*ring)[(start + i) & (kRingSize - 1)];
         }
@@ -1093,10 +1097,13 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   drawGrid(r, cache, plot, state->show_grid.load());
   drawScaleRefs(r, plot, state);
 
-  const bool draw_persistence = state->persistence.load() && (render_fps <= 1.0 || render_fps >= 55.0);
-  if (draw_persistence) drawTraceLayer(r, args, state, previous, plot, 28, 1, false);
-  drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
-  drawTrigger(r, frame, plot, state, args);
+  const bool has_frame = frame.valid && frame.count > 1;
+  const bool draw_persistence = has_frame && previous.valid && frame.triggered && previous.triggered &&
+                                state->persistence.load() &&
+                                (render_fps <= 1.0 || render_fps >= 55.0);
+  if (draw_persistence) drawTraceLayer(r, args, state, previous, plot, 12, 1, false);
+  if (has_frame) drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
+  if (has_frame) drawTrigger(r, frame, plot, state, args);
 
   if (state->view_mode.load() == VIEW_SPLIT) {
     drawText(r, plot.x + 12, plot.y + 10, "VOLTAGE", {112, 132, 136, 150}, 2);
