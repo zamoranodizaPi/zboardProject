@@ -383,16 +383,6 @@ bool waitForDrdyActive(int fd, int timeout_ms) {
   return readGpioValue(fd) == 0;
 }
 
-bool waitForDrdyInactive(int fd, int timeout_us) {
-  if (fd < 0) return false;
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (readGpioValue(fd) == 1) return true;
-    std::this_thread::sleep_for(std::chrono::microseconds(20));
-  }
-  return readGpioValue(fd) == 1;
-}
-
 void pinThreadToCpu(int cpu) {
   cpu_set_t set;
   CPU_ZERO(&set);
@@ -845,6 +835,17 @@ void drawPolyline(SDL_Renderer *r, SDL_FPoint *points, int count, int width) {
   }
 }
 
+uint16_t frameStatusSeq(const Sample &sample) {
+  return static_cast<uint16_t>(sample.status & 0xFFFFu);
+}
+
+bool contiguousStatus(const Sample &a, const Sample &b) {
+  if ((a.status & 0xFF0000u) != 0x050000u || (b.status & 0xFF0000u) != 0x050000u) {
+    return true;
+  }
+  return static_cast<uint16_t>(frameStatusSeq(a) + 1u) == frameStatusSeq(b);
+}
+
 void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect area,
                float vdiv, float peak, Color color, int width) {
   if (frame.count < 2) return;
@@ -860,7 +861,14 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
     points[i].x = area.x + step * static_cast<float>(i);
     points[i].y = center - frame.samples[i].ch[channel] * scale;
   }
-  drawPolyline(r, points.data(), static_cast<int>(point_count), width);
+  size_t segment_start = 0;
+  for (size_t i = 1; i < point_count; ++i) {
+    if (contiguousStatus(frame.samples[i - 1], frame.samples[i])) continue;
+    drawPolyline(r, points.data() + segment_start, static_cast<int>(i - segment_start), width);
+    segment_start = i;
+  }
+  drawPolyline(r, points.data() + segment_start,
+               static_cast<int>(point_count - segment_start), width);
 }
 
 void drawTrigger(SDL_Renderer *r, const DisplayFrame &frame, SDL_Rect plot, ScopeState *state,
