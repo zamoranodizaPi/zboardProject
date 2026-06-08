@@ -579,7 +579,7 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
           last_trigger = trigger_seq;
           last_auto = std::chrono::steady_clock::now();
           state->trigger_state = TRIG_HIT;
-        } else if (mode == TRIG_AUTO) {
+        } else if (mode == TRIG_AUTO || mode == TRIG_NORMAL) {
           const auto now = std::chrono::steady_clock::now();
           const int front = state->front_display.load(std::memory_order_acquire);
           const bool have_display = (*display)[front].valid;
@@ -843,7 +843,8 @@ bool contiguousStatus(const Sample &a, const Sample &b) {
   if ((a.status & 0xFF0000u) != 0x050000u || (b.status & 0xFF0000u) != 0x050000u) {
     return true;
   }
-  return static_cast<uint16_t>(frameStatusSeq(a) + 1u) == frameStatusSeq(b);
+  const uint16_t gap = static_cast<uint16_t>(frameStatusSeq(b) - frameStatusSeq(a));
+  return gap >= 1 && gap <= 2;
 }
 
 void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect area,
