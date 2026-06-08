@@ -79,6 +79,20 @@ enum ViewMode : int {
   VIEW_STACKED = 2,
 };
 
+enum TriggerMode : int {
+  TRIG_AUTO = 0,
+  TRIG_NORMAL = 1,
+  TRIG_SINGLE = 2,
+  TRIG_FREE = 3,
+};
+
+enum TriggerState : int {
+  TRIG_WAIT = 0,
+  TRIG_ARMED = 1,
+  TRIG_HIT = 2,
+  TRIG_STOPPED = 3,
+};
+
 struct Measurements {
   float freq = 0.0f;
   float rms = 0.0f;
@@ -98,8 +112,11 @@ struct ScopeState {
   std::atomic<int> front_display{0};
   std::atomic<int> trigger_channel{0};
   std::atomic<bool> trigger_rising{true};
-  std::atomic<bool> trigger_auto{true};
+  std::atomic<int> trigger_mode{TRIG_AUTO};
+  std::atomic<int> trigger_state{TRIG_ARMED};
   std::atomic<float> trigger_level{0.0f};
+  std::atomic<float> trigger_hysteresis{0.02f};
+  std::atomic<float> trigger_holdoff_ms{60.0f};
   std::atomic<float> volts_per_div{0.25f};
   std::atomic<float> time_per_div{kVisibleCycles / kLineHz / 10.0f};
   std::atomic<float> horizontal_position{0.25f};
@@ -108,12 +125,14 @@ struct ScopeState {
   std::atomic<bool> show_grid{true};
   std::atomic<bool> persistence{true};
   std::atomic<bool> panel_open{true};
+  std::atomic<bool> perf_overlay{false};
   std::atomic<bool> show_channel[kMaxChannels];
 };
 
 struct DisplayFrame {
   size_t count = 0;
   uint64_t end_seq = 0;
+  size_t trigger_index = 0;
   bool triggered = false;
   std::array<Measurements, kMaxChannels> measurements{};
   std::vector<Sample> samples;
@@ -436,31 +455,53 @@ size_t samplesPerScreen(const Args &args, const ScopeState &state) {
   return static_cast<size_t>(std::clamp(samples, 64.0, static_cast<double>(kRingSize / 2)));
 }
 
-uint64_t findTriggerStart(const Args &args, ScopeState *state, const std::vector<Sample> &ring,
-                          uint64_t latest, size_t count, bool *triggered) {
+const char *triggerModeName(int mode) {
+  switch (mode) {
+    case TRIG_NORMAL: return "NORMAL";
+    case TRIG_SINGLE: return "SINGLE";
+    case TRIG_FREE: return "FREE";
+    default: return "AUTO";
+  }
+}
+
+const char *triggerStateName(int state) {
+  switch (state) {
+    case TRIG_ARMED: return "ARMED";
+    case TRIG_HIT: return "TRIG'D";
+    case TRIG_STOPPED: return "STOP";
+    default: return "WAIT";
+  }
+}
+
+uint64_t pretriggerSamples(size_t count) {
+  return std::clamp<uint64_t>(static_cast<uint64_t>(count * 0.30), 8,
+                              static_cast<uint64_t>(count - 8));
+}
+
+bool crossesTrigger(const Sample &a, const Sample &b, int ch, float level, float hysteresis,
+                    bool rising) {
+  if (rising) return a.ch[ch] <= level - hysteresis && b.ch[ch] >= level + hysteresis;
+  return a.ch[ch] >= level + hysteresis && b.ch[ch] <= level - hysteresis;
+}
+
+uint64_t findTriggeredSeq(const Args &args, ScopeState *state, const std::vector<Sample> &ring,
+                          uint64_t scan_begin, uint64_t scan_end, bool *triggered) {
   const int ch = std::clamp(state->trigger_channel.load(), 0, args.channels - 1);
   const float level = state->trigger_level.load();
+  const float hysteresis = std::max(0.001f, state->trigger_hysteresis.load());
   const bool rising = state->trigger_rising.load();
   *triggered = false;
-  if (latest < 4) return latest > count ? latest - count : 0;
+  if (scan_end <= scan_begin + 1) return scan_end;
 
-  const float pos = std::clamp(state->horizontal_position.load(), 0.08f, 0.85f);
-  const uint64_t pre = std::clamp<uint64_t>(static_cast<uint64_t>(count * pos), 8, count - 8);
-  const uint64_t post = count - pre;
-  const uint64_t scan_from = latest > post ? latest - post : 1;
-  const uint64_t scan_span = std::min<uint64_t>(count, kRingSize - 2);
-  const uint64_t scan_begin = scan_from > scan_span ? scan_from - scan_span : 1;
-  for (uint64_t seq = scan_from; seq > scan_begin; --seq) {
+  for (uint64_t seq = scan_begin + 1; seq <= scan_end; ++seq) {
     const Sample &a = ring[(seq - 1) & (kRingSize - 1)];
     const Sample &b = ring[seq & (kRingSize - 1)];
-    bool crossed = rising ? (a.ch[ch] < level && b.ch[ch] >= level)
-                          : (a.ch[ch] > level && b.ch[ch] <= level);
-    if (crossed) {
+    if (crossesTrigger(a, b, ch, level, hysteresis, rising)) {
       *triggered = true;
-      return seq > pre ? seq - pre : 0;
+      return seq;
     }
   }
-  return latest > count ? latest - count : 0;
+  return scan_end;
 }
 
 Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_rate) {
@@ -504,17 +545,61 @@ Measurements measureChannel(const DisplayFrame &frame, int channel, int sample_r
 void processingThread(const Args args, ScopeState *state, const std::vector<Sample> *ring,
                       std::array<DisplayFrame, kDisplayBuffers> *display) {
   pinThreadToCpu(2);
+  uint64_t last_scan = 1;
+  uint64_t last_trigger = 0;
+  auto last_auto = std::chrono::steady_clock::now();
   while (state->running.load(std::memory_order_relaxed)) {
     const uint64_t latest = state->write_seq.load(std::memory_order_acquire);
     const size_t count = samplesPerScreen(args, *state);
     if (latest > count + 4) {
+      const uint64_t pre = pretriggerSamples(count);
+      const uint64_t post = count - pre;
+      const int mode = state->trigger_mode.load();
+      const uint64_t newest_triggerable = latest > post + 2 ? latest - post - 1 : 1;
+      const uint64_t holdoff_samples =
+          static_cast<uint64_t>((state->trigger_holdoff_ms.load() * args.sample_rate) / 1000.0f);
       bool triggered = false;
-      uint64_t start = findTriggerStart(args, state, *ring, latest, count, &triggered);
-      if (triggered || state->trigger_auto.load()) {
+      bool publish = false;
+      uint64_t trigger_seq = newest_triggerable;
+
+      if (mode == TRIG_SINGLE && state->trigger_state.load() == TRIG_STOPPED) {
+        publish = false;
+      } else if (mode == TRIG_FREE) {
+        publish = latest > count;
+        trigger_seq = latest > post ? latest - post : latest;
+        state->trigger_state = TRIG_HIT;
+      } else if (newest_triggerable > last_scan + 1) {
+        state->trigger_state = TRIG_ARMED;
+        const uint64_t scan_begin = std::max<uint64_t>(last_scan, last_trigger + holdoff_samples);
+        trigger_seq = findTriggeredSeq(args, state, *ring, scan_begin, newest_triggerable, &triggered);
+        last_scan = newest_triggerable;
+        if (triggered) {
+          publish = true;
+          last_trigger = trigger_seq;
+          last_auto = std::chrono::steady_clock::now();
+          state->trigger_state = TRIG_HIT;
+        } else if (mode == TRIG_AUTO) {
+          const auto now = std::chrono::steady_clock::now();
+          if (std::chrono::duration<double>(now - last_auto).count() > 0.20) {
+            publish = true;
+            trigger_seq = newest_triggerable;
+            last_auto = now;
+            state->trigger_state = TRIG_WAIT;
+          } else {
+            state->trigger_state = TRIG_WAIT;
+          }
+        } else {
+          state->trigger_state = TRIG_WAIT;
+        }
+      }
+
+      if (publish && trigger_seq >= pre && latest > trigger_seq + post) {
+        const uint64_t start = trigger_seq - pre;
         int back = 1 - state->front_display.load(std::memory_order_acquire);
         DisplayFrame &dst = (*display)[back];
         dst.count = count;
-        dst.end_seq = start + count;
+        dst.end_seq = start + count - 1;
+        dst.trigger_index = static_cast<size_t>(pre);
         dst.triggered = triggered;
         for (size_t i = 0; i < count; ++i) {
           dst.samples[i] = (*ring)[(start + i) & (kRingSize - 1)];
@@ -523,9 +608,10 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
           dst.measurements[ch] = measureChannel(dst, ch, args.sample_rate);
         }
         state->front_display.store(back, std::memory_order_release);
+        if (mode == TRIG_SINGLE && triggered) state->trigger_state = TRIG_STOPPED;
       }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
 
@@ -675,16 +761,16 @@ void drawGrid(SDL_Renderer *r, RenderCache *cache, SDL_Rect area, bool show_grid
     float px = cache->grid_x[x];
     const bool major = x % 5 == 0;
     const bool center = x == 25;
-    setColor(r, center ? Color{100, 120, 126, 125}
-                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
+    setColor(r, center ? Color{112, 132, 138, 135}
+                       : (major ? Color{94, 106, 112, 82} : Color{62, 72, 78, 30}));
     line(r, px, area.y, px, area.y + area.h);
   }
   for (int y = 0; y <= 40; ++y) {
     float py = cache->grid_y[y];
     const bool major = y % 5 == 0;
     const bool center = y == 20;
-    setColor(r, center ? Color{100, 120, 126, 125}
-                       : (major ? Color{82, 94, 100, 74} : Color{58, 68, 74, 24}));
+    setColor(r, center ? Color{112, 132, 138, 135}
+                       : (major ? Color{94, 106, 112, 82} : Color{62, 72, 78, 30}));
     line(r, area.x, py, area.x + area.w, py);
   }
 }
@@ -759,14 +845,26 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
   drawPolyline(r, points.data(), static_cast<int>(point_count), width);
 }
 
-void drawTrigger(SDL_Renderer *r, SDL_Rect plot, ScopeState *state) {
+void drawTrigger(SDL_Renderer *r, const DisplayFrame &frame, SDL_Rect plot, ScopeState *state) {
   const float vdiv = std::max(0.02f, state->volts_per_div.load());
   const float trig_y = plot.y + plot.h * 0.5f -
                        state->trigger_level.load() * ((plot.h / 8.0f) / vdiv);
-  setColor(r, {255, 150, 55, 210});
+  const float trig_x = plot.x + plot.w *
+      (frame.count > 1 ? static_cast<float>(frame.trigger_index) / static_cast<float>(frame.count - 1)
+                       : 0.30f);
+  setColor(r, {255, 150, 55, 190});
   thickLine(r, plot.x - 8, trig_y, plot.x + plot.w + 8, trig_y, 1);
+  setColor(r, {255, 190, 70, 165});
+  thickLine(r, trig_x, plot.y, trig_x, plot.y + plot.h, 1);
+  SDL_FPoint arrow[4] = {
+      {trig_x - 8.0f, static_cast<float>(plot.y + 2)},
+      {trig_x + 8.0f, static_cast<float>(plot.y + 2)},
+      {trig_x, static_cast<float>(plot.y + 15)},
+      {trig_x - 8.0f, static_cast<float>(plot.y + 2)},
+  };
+  SDL_RenderDrawLinesF(r, arrow, 4);
   drawText(r, plot.x + plot.w - 64, static_cast<int>(trig_y) - 16, "TRIG",
-           {255, 170, 80, 210}, 1);
+           {255, 170, 80, 205}, 1);
 }
 
 void drawTopBar(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
@@ -783,15 +881,16 @@ void drawTopBar(SDL_Renderer *r, const Args &args, ScopeState *state, const Disp
   drawRect(r, run, state->capture.load() ? green : amber);
   drawText(r, run.x + 17, run.y + 7, state->capture.load() ? "RUN" : "HOLD", green, 2);
 
-  SDL_Rect trig{112, 14, 104, 28};
-  fillRect(r, trig, frame.triggered ? Color{58, 44, 12, 255} : Color{24, 29, 32, 255});
-  drawRect(r, trig, frame.triggered ? amber : Color{80, 94, 98, 210});
-  drawText(r, trig.x + 12, trig.y + 7,
-           frame.triggered ? "TRIG'D" : (state->trigger_auto.load() ? "AUTO" : "WAIT"),
-           frame.triggered ? amber : dim, 2);
+  SDL_Rect trig{112, 14, 124, 28};
+  const int trig_state = state->trigger_state.load();
+  const bool trig_hit = trig_state == TRIG_HIT || frame.triggered;
+  fillRect(r, trig, trig_hit ? Color{58, 44, 12, 255} : Color{20, 25, 28, 255});
+  drawRect(r, trig, trig_hit ? amber : Color{80, 94, 98, 210});
+  drawText(r, trig.x + 11, trig.y + 7, frame.triggered ? "TRIG'D" : triggerStateName(trig_state),
+           trig_hit ? amber : dim, 2);
 
   char buf[64];
-  int x = 250;
+  int x = 270;
   std::snprintf(buf, sizeof(buf), "FS %.1fKS/S", args.sample_rate / 1000.0f);
   drawText(r, x, 18, buf, text, 2);
   x += 178;
@@ -810,43 +909,52 @@ void drawTopBar(SDL_Renderer *r, const Args &args, ScopeState *state, const Disp
 
 void drawSidePanel(SDL_Renderer *r, const Args &args, ScopeState *state, SDL_Rect panel) {
   if (!state->panel_open.load()) return;
-  fillRect(r, panel, {9, 13, 16, 238});
-  drawRect(r, panel, {52, 64, 70, 170});
-  Color title{185, 205, 202, 235};
-  Color dim{120, 140, 145, 220};
+  fillRect(r, panel, {4, 7, 9, 232});
+  drawRect(r, panel, {38, 48, 54, 130});
+  Color title{142, 164, 162, 205};
+  Color dim{82, 101, 106, 185};
   int selected = state->selected_channel.load();
   int y = panel.y + 18;
-  drawText(r, panel.x + 16, y, "CHANNELS", title, 2);
-  y += 30;
+  drawText(r, panel.x + 16, y, "CHANNELS", title, 1);
+  y += 24;
   for (int ch = 0; ch < args.channels; ++ch) {
-    Color c = ch == selected ? kTraceColors[ch] : scaled(kTraceColors[ch], 0.68f, 215);
-    if (ch == selected) fillRect(r, SDL_Rect{panel.x + 10, y - 5, panel.w - 20, 24}, {28, 36, 38, 230});
-    fillRect(r, SDL_Rect{panel.x + 16, y + 2, 14, 14}, c);
+    Color c = ch == selected ? kTraceColors[ch] : scaled(kTraceColors[ch], 0.52f, 160);
+    if (ch == selected) fillRect(r, SDL_Rect{panel.x + 10, y - 4, panel.w - 20, 20}, {19, 26, 28, 220});
+    fillRect(r, SDL_Rect{panel.x + 16, y + 1, 11, 11}, c);
     char label[32];
     std::snprintf(label, sizeof(label), "CH%d %s", ch + 1,
                   state->show_channel[ch].load() ? "ON" : "OFF");
-    drawText(r, panel.x + 40, y, label, state->show_channel[ch].load() ? c : dim, 2);
-    y += 25;
+    drawText(r, panel.x + 36, y, label, state->show_channel[ch].load() ? c : dim, 1);
+    y += 20;
   }
   y += 16;
-  drawText(r, panel.x + 16, y, "TRIGGER", title, 2);
-  y += 28;
-  drawText(r, panel.x + 16, y, "EDGE", dim, 2);
-  drawText(r, panel.x + 92, y, state->trigger_rising.load() ? "RISING" : "FALL", title, 2);
-  y += 24;
+  drawText(r, panel.x + 16, y, "TRIGGER", title, 1);
+  y += 22;
   char buf[48];
+  std::snprintf(buf, sizeof(buf), "MODE %s", triggerModeName(state->trigger_mode.load()));
+  drawText(r, panel.x + 16, y, buf, dim, 1);
+  y += 18;
+  std::snprintf(buf, sizeof(buf), "SOURCE CH%d", state->trigger_channel.load() + 1);
+  drawText(r, panel.x + 16, y, buf, dim, 1);
+  y += 18;
+  std::snprintf(buf, sizeof(buf), "EDGE %s", state->trigger_rising.load() ? "RISING" : "FALL");
+  drawText(r, panel.x + 16, y, buf, dim, 1);
+  y += 18;
   std::snprintf(buf, sizeof(buf), "LEVEL %.2F", state->trigger_level.load());
-  drawText(r, panel.x + 16, y, buf, dim, 2);
-  y += 42;
-  drawText(r, panel.x + 16, y, "ACQUISITION", title, 2);
+  drawText(r, panel.x + 16, y, buf, dim, 1);
+  y += 18;
+  std::snprintf(buf, sizeof(buf), "HYST %.3F", state->trigger_hysteresis.load());
+  drawText(r, panel.x + 16, y, buf, dim, 1);
   y += 28;
+  drawText(r, panel.x + 16, y, "ACQUISITION", title, 1);
+  y += 22;
   std::snprintf(buf, sizeof(buf), "RATE %d", args.sample_rate);
-  drawText(r, panel.x + 16, y, buf, dim, 2);
-  y += 24;
+  drawText(r, panel.x + 16, y, buf, dim, 1);
+  y += 18;
   std::snprintf(buf, sizeof(buf), "BUFFER %uK", static_cast<unsigned>(kRingSize / 1024));
-  drawText(r, panel.x + 16, y, buf, dim, 2);
-  y += 24;
-  drawText(r, panel.x + 16, y, viewModeName(state->view_mode.load()), dim, 2);
+  drawText(r, panel.x + 16, y, buf, dim, 1);
+  y += 18;
+  drawText(r, panel.x + 16, y, viewModeName(state->view_mode.load()), dim, 1);
 }
 
 void drawBottomBar(SDL_Renderer *r, const Args &args, ScopeState *state,
@@ -856,12 +964,70 @@ void drawBottomBar(SDL_Renderer *r, const Args &args, ScopeState *state,
   const int ch = std::clamp(state->selected_channel.load(), 0, args.channels - 1);
   const Measurements &m = frame.measurements[ch];
   Color c = kTraceColors[ch];
-  fillRect(r, SDL_Rect{20, h - 42, 18, 18}, c);
-  char buf[192];
-  std::snprintf(buf, sizeof(buf),
-                "CH%d %s   FREQ %.2FHZ   RMS %.3F   PEAK %.3F   VPP %.3F   PHASE %.1F   THD %.1F",
-                ch + 1, kNames[ch], m.freq, m.rms, m.peak, m.vpp, m.phase, m.thd);
-  drawText(r, 52, h - 44, buf, {205, 222, 220, 238}, 2);
+  const int card_y = h - 48;
+  fillRect(r, SDL_Rect{18, card_y, 104, 30}, {14, 20, 22, 255});
+  drawRect(r, SDL_Rect{18, card_y, 104, 30}, scaled(c, 0.9f, 210));
+  fillRect(r, SDL_Rect{30, card_y + 9, 13, 13}, c);
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "CH%d %s", ch + 1, kNames[ch]);
+  drawText(r, 52, card_y + 8, buf, {205, 222, 220, 238}, 1);
+
+  struct Readout {
+    const char *name;
+    float value;
+    const char *unit;
+  };
+  const Readout readouts[] = {
+      {"FREQ", m.freq, "HZ"}, {"RMS", m.rms, ""},   {"VPP", m.vpp, ""},
+      {"PEAK", m.peak, ""},   {"PHASE", m.phase, ""}, {"THD", m.thd, ""},
+  };
+  int x = 138;
+  for (const auto &ro : readouts) {
+    fillRect(r, SDL_Rect{x, card_y, 124, 30}, {12, 17, 19, 240});
+    drawRect(r, SDL_Rect{x, card_y, 124, 30}, {40, 50, 54, 150});
+    std::snprintf(buf, sizeof(buf), "%s %.2F%s", ro.name, ro.value, ro.unit);
+    drawText(r, x + 10, card_y + 8, buf, {178, 202, 200, 220}, 1);
+    x += 132;
+    if (x > w - 130) break;
+  }
+}
+
+void drawScaleRefs(SDL_Renderer *r, SDL_Rect plot, ScopeState *state) {
+  Color dim{112, 132, 136, 170};
+  const float vdiv = state->volts_per_div.load();
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "+%.0FMV", vdiv * 2000.0f);
+  drawText(r, 14, plot.y + 10, buf, dim, 1);
+  drawText(r, 28, plot.y + plot.h / 2 - 4, "0V", dim, 1);
+  std::snprintf(buf, sizeof(buf), "-%.0FMV", vdiv * 2000.0f);
+  drawText(r, 14, plot.y + plot.h - 22, buf, dim, 1);
+
+  const float total_ms = state->time_per_div.load() * 10000.0f;
+  drawText(r, plot.x, plot.y + plot.h + 8, "0MS", dim, 1);
+  std::snprintf(buf, sizeof(buf), "%.0FMS", total_ms * 0.5f);
+  drawText(r, plot.x + plot.w / 2 - 16, plot.y + plot.h + 8, buf, dim, 1);
+  std::snprintf(buf, sizeof(buf), "%.0FMS", total_ms);
+  drawText(r, plot.x + plot.w - 42, plot.y + plot.h + 8, buf, dim, 1);
+}
+
+void drawPerfOverlay(SDL_Renderer *r, ScopeState *state, double render_fps, int w) {
+  SDL_Rect box{w - 238, 70, 220, 116};
+  fillRect(r, box, {5, 8, 10, 232});
+  drawRect(r, box, {70, 86, 92, 160});
+  Color text{170, 196, 194, 220};
+  char buf[64];
+  drawText(r, box.x + 12, box.y + 10, "PERFORMANCE", text, 1);
+  std::snprintf(buf, sizeof(buf), "FPS %.1F", render_fps);
+  drawText(r, box.x + 12, box.y + 30, buf, text, 1);
+  std::snprintf(buf, sizeof(buf), "FRAMES %llu",
+                static_cast<unsigned long long>(state->frames.load()));
+  drawText(r, box.x + 12, box.y + 48, buf, text, 1);
+  std::snprintf(buf, sizeof(buf), "ERRORS %llu",
+                static_cast<unsigned long long>(state->errors.load()));
+  drawText(r, box.x + 12, box.y + 66, buf, text, 1);
+  std::snprintf(buf, sizeof(buf), "OVERRUNS %llu",
+                static_cast<unsigned long long>(state->overruns.load()));
+  drawText(r, box.x + 12, box.y + 84, buf, text, 1);
 }
 
 void drawTraceLayer(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayFrame &frame,
@@ -894,11 +1060,12 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   SDL_Rect plot{70, 74, w - 100 - panel_w, h - 150};
   fillRect(r, plot, {0, 0, 0, 255});
   drawGrid(r, cache, plot, state->show_grid.load());
+  drawScaleRefs(r, plot, state);
 
   const bool draw_persistence = state->persistence.load() && (render_fps <= 1.0 || render_fps >= 55.0);
   if (draw_persistence) drawTraceLayer(r, args, state, previous, plot, 28, 1, false);
   drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
-  drawTrigger(r, plot, state);
+  drawTrigger(r, frame, plot, state);
 
   if (state->view_mode.load() == VIEW_SPLIT) {
     drawText(r, plot.x + 12, plot.y + 10, "VOLTAGE", {112, 132, 136, 150}, 2);
@@ -908,6 +1075,7 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
     drawTopBar(r, args, state, frame, render_fps, w);
     drawSidePanel(r, args, state, SDL_Rect{w - panel_w + 8, 74, std::max(0, panel_w - 18), h - 150});
     drawBottomBar(r, args, state, frame, w, h);
+    if (state->perf_overlay.load()) drawPerfOverlay(r, state, render_fps, w);
   }
 }
 
@@ -967,17 +1135,26 @@ void handleEvent(const SDL_Event &event, ScopeState *state, const Args &args,
   SDL_Keycode key = event.key.keysym.sym;
   if (key == SDLK_ESCAPE || key == SDLK_q) state->running = false;
   if (key == SDLK_SPACE) state->capture = !state->capture.load();
-  if (key == SDLK_t) state->trigger_auto = !state->trigger_auto.load();
+  if (key == SDLK_t) {
+    state->trigger_mode = (state->trigger_mode.load() + 1) % 4;
+    state->trigger_state = TRIG_ARMED;
+  }
   if (key == SDLK_g) state->show_grid = !state->show_grid.load();
   if (key == SDLK_p) state->persistence = !state->persistence.load();
+  if (key == SDLK_d) state->perf_overlay = !state->perf_overlay.load();
   if (key == SDLK_m || key == SDLK_v) {
     state->view_mode = (state->view_mode.load() + 1) % 3;
   }
   if (key == SDLK_o) state->panel_open = !state->panel_open.load();
   if (key == SDLK_a) autoscaleFromFrame(state, frame, args.channels);
   if (key == SDLK_e) state->trigger_rising = !state->trigger_rising.load();
-  if (key == SDLK_LEFTBRACKET) state->trigger_level = state->trigger_level.load() - 0.05f;
-  if (key == SDLK_RIGHTBRACKET) state->trigger_level = state->trigger_level.load() + 0.05f;
+  if (key == SDLK_r && state->trigger_mode.load() == TRIG_SINGLE) state->trigger_state = TRIG_ARMED;
+  if (key == SDLK_LEFTBRACKET) {
+    state->trigger_level = std::clamp(state->trigger_level.load() - 0.05f, -1.0f, 1.0f);
+  }
+  if (key == SDLK_RIGHTBRACKET) {
+    state->trigger_level = std::clamp(state->trigger_level.load() + 0.05f, -1.0f, 1.0f);
+  }
   if (key == SDLK_EQUALS || key == SDLK_PLUS || key == SDLK_KP_PLUS) {
     state->time_per_div = state->time_per_div.load() * 0.8f;
   }
