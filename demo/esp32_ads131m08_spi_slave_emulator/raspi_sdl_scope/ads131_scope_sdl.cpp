@@ -30,6 +30,7 @@ constexpr int kMaxChannels = 8;
 constexpr int kDisplayBuffers = 2;
 constexpr size_t kRingSize = 1u << 16;
 constexpr size_t kMaxRenderPoints = 8192;
+constexpr size_t kTargetTracePoints = 240;
 constexpr double kAdc24FullScale = 8388607.0;
 constexpr float kLineHz = 60.0f;
 constexpr float kVisibleCycles = 6.0f;
@@ -745,7 +746,7 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
                float vdiv, float peak, Color color, int width) {
   if (frame.count < 2) return;
   static thread_local std::array<SDL_FPoint, kMaxRenderPoints> points;
-  const size_t point_count = std::min(frame.count, kMaxRenderPoints);
+  const size_t point_count = std::min({frame.count, kMaxRenderPoints, kTargetTracePoints});
   const float center = area.y + area.h * 0.5f;
   const float manual_scale = (area.h / 8.0f) / std::max(0.02f, vdiv);
   const float auto_scale = (area.h * kTraceUseHeight * 0.5f) / std::max(0.05f, peak);
@@ -753,8 +754,9 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
   const float step = static_cast<float>(area.w) / static_cast<float>(point_count - 1);
   setColor(r, color);
   for (size_t i = 0; i < point_count; ++i) {
+    const size_t src = (i * (frame.count - 1)) / (point_count - 1);
     points[i].x = area.x + step * static_cast<float>(i);
-    points[i].y = center - frame.samples[i].ch[channel] * scale;
+    points[i].y = center - frame.samples[src].ch[channel] * scale;
   }
   drawPolyline(r, points.data(), static_cast<int>(point_count), width);
 }
