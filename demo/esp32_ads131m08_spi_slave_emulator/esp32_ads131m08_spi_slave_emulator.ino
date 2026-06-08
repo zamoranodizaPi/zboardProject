@@ -108,7 +108,7 @@ struct ChannelConfig {
   float amplitude;
   float phaseOffsetDeg;
   int32_t offset;
-  uint32_t phase;       // kept for compatibility with commands/debug
+  uint32_t phase;       // 32-bit phase accumulator
   uint32_t phaseStep;
   int32_t counter;
 };
@@ -138,7 +138,6 @@ static RuntimeStats stats;
 static uint8_t currentFrame[MAX_FRAME_BYTES];
 static volatile uint16_t currentFrameBytes = 0;
 static volatile uint32_t frameSequence = 0;
-static volatile uint32_t phaseZeroTick = 0;
 static volatile uint32_t drdyReleaseAtUs = 0;
 
 DMA_ATTR static uint8_t txBuffers[SPI_QUEUE_DEPTH][MAX_FRAME_BYTES];
@@ -220,7 +219,7 @@ static uint32_t phaseFromDegrees(float degrees) {
 
 // ------------------------- SAMPLE GENERATION --------------------------
 
-static int32_t generateChannelSample(uint8_t chIndex, uint32_t sampleIndex) {
+static int32_t generateChannelSample(uint8_t chIndex) {
   ChannelConfig &ch = channels[chIndex];
   const int32_t fullScale = 0x7FFFFF;
   const int32_t amp = clamp24((int64_t)(ch.amplitude * (float)fullScale));
@@ -230,21 +229,19 @@ static int32_t generateChannelSample(uint8_t chIndex, uint32_t sampleIndex) {
       return clamp24((int64_t)ch.constantValue + ch.offset);
 
     case SIGNAL_COUNTER:
-      ch.counter = (int32_t)(sampleIndex * (uint32_t)(1 + chIndex));
+      ch.counter += 1 + chIndex;
       return clamp24((int64_t)ch.counter + ch.offset);
 
     case SIGNAL_SINE: {
-      uint32_t phaseWithOffset =
-          (uint32_t)((uint64_t)sampleIndex * (uint64_t)ch.phaseStep) +
-          phaseFromDegrees(ch.phaseOffsetDeg);
+      ch.phase += ch.phaseStep;
+      uint32_t phaseWithOffset = ch.phase + phaseFromDegrees(ch.phaseOffsetDeg);
       const float radians = ((float)phaseWithOffset / 4294967296.0f) * TWO_PI;
       return clamp24((int64_t)(sinf(radians) * (float)amp) + ch.offset);
     }
 
     case SIGNAL_TRIANGLE: {
-      uint32_t p =
-          (uint32_t)((uint64_t)sampleIndex * (uint64_t)ch.phaseStep) +
-          phaseFromDegrees(ch.phaseOffsetDeg);
+      ch.phase += ch.phaseStep;
+      uint32_t p = ch.phase + phaseFromDegrees(ch.phaseOffsetDeg);
       int32_t tri = (p < 0x80000000u)
                       ? (int32_t)(p >> 7) - 0x800000
                       : 0x7FFFFF - (int32_t)((p - 0x80000000u) >> 7);
@@ -290,19 +287,18 @@ static void packWord(uint8_t *dst, int32_t sample24) {
   }
 }
 
-static void buildFrame(uint32_t sampleTick) {
+static void buildFrame() {
   const uint32_t startUs = micros();
   const uint8_t bytes = wordBytes();
   uint8_t *p = currentFrame;
   uint32_t seq = frameSequence++;
-  const uint32_t sampleIndex = sampleTick - phaseZeroTick;
 
   int32_t status = (int32_t)(0x050000 | (seq & 0xFFFF)); // recognizable status marker + sequence
   packWord(p, status);
   p += bytes;
 
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-    packWord(p, generateChannelSample(ch, sampleIndex));
+    packWord(p, generateChannelSample(ch));
     p += bytes;
   }
 
@@ -449,11 +445,8 @@ static void startStreaming() {
 }
 
 static void syncPhaseToVaZeroCrossing() {
-  portENTER_CRITICAL(&timerMux);
-  phaseZeroTick = stats.sampleTicks;
-  portEXIT_CRITICAL(&timerMux);
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-    channels[ch].phase = 0;
+    channels[ch].phase = 0u - channels[ch].phaseStep;
     channels[ch].counter = 0;
   }
   frameSequence = 0;
@@ -692,12 +685,10 @@ void loop() {
   serviceDrdyPulse();
 
   if (stats.sampleDue && !stats.drdyAsserted && !spiTransactionInFlight) {
-    uint32_t sampleTick;
     portENTER_CRITICAL(&timerMux);
-    sampleTick = stats.sampleTicks;
     stats.sampleDue = false;
     portEXIT_CRITICAL(&timerMux);
-    buildFrame(sampleTick);
+    buildFrame();
     prepareSpiBuffer(0);
     spiTransactionInFlight = true;
     stats.drdyAsserted = true;
