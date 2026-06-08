@@ -15,6 +15,8 @@
 #include <SPI.h>
 #include <strings.h>
 
+#include "frequency_pll.h"
+
 #if __has_include(<esp_arduino_version.h>)
 #include <esp_arduino_version.h>
 #endif
@@ -33,12 +35,12 @@ static const int PIN_SYNC_PULSE = 26;
 static const int PIN_FAULT = 33;
 
 static const uint8_t NUM_CHANNELS = 8;
-static const uint8_t WORD_BYTES = 3;
+static const uint8_t WORD_BYTES = 2;
 static const uint16_t FRAME_BYTES = (1 + NUM_CHANNELS) * WORD_BYTES;
 static const uint32_t SPI_HZ = 10000000;
-static const uint32_t NOMINAL_SAMPLE_RATE = 8000;
+static const uint32_t NOMINAL_SAMPLE_RATE = 16000;
 static const uint32_t TELEMETRY_MS = 100;
-static const uint32_t MIN_ADS_READ_INTERVAL_US = 112;
+static const uint32_t MIN_ADS_READ_INTERVAL_US = 52;
 static const uint32_t SYNC_PULSE_US = 800;
 static const uint32_t FIELD_PWM_HZ = 20000;
 static const uint8_t FIELD_PWM_BITS = 10;
@@ -48,6 +50,9 @@ static const uint8_t FIELD_PWM_CH = 0;
 
 struct Measurements {
   float freq_hz = 0.0f;
+  float rocof_hz_s = 0.0f;
+  float phase_deg = 0.0f;
+  bool pll_locked = false;
   float va_rms = 0.0f;
   float vb_rms = 0.0f;
   float vc_rms = 0.0f;
@@ -122,8 +127,8 @@ static int32_t signExtend24(uint32_t v) {
   return (int32_t)v;
 }
 
-static int32_t readS24(const uint8_t *p) {
-  return signExtend24(((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2]);
+static int32_t readS16(const uint8_t *p) {
+  return (int16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
 
 static float clampf(float value, float lo, float hi) {
@@ -163,16 +168,18 @@ static bool readAdsFrame() {
   adsSpi.endTransaction();
   digitalWrite(PIN_ADS_CS, HIGH);
 
-  const uint32_t status = ((uint32_t)rxFrame[0] << 16) | ((uint32_t)rxFrame[1] << 8) | rxFrame[2];
-  if ((status & 0x00FF0000u) != 0x00050000u) {
+  const uint16_t status = ((uint16_t)rxFrame[0] << 8) | rxFrame[1];
+  if ((status & 0xFF00u) != 0x0500u) {
     badFrames++;
     return false;
   }
 
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-    chRaw[ch] = readS24(&rxFrame[(1 + ch) * WORD_BYTES]);
-    chNorm[ch] = (float)chRaw[ch] / 8388607.0f;
+    chRaw[ch] = readS16(&rxFrame[(1 + ch) * WORD_BYTES]);
+    chNorm[ch] = (float)chRaw[ch] / 32768.0f;
   }
+  const int16_t vaForPll = (int16_t)chRaw[0];
+  pushSamples(&vaForPll, 1);
   framesRead++;
   return true;
 }
@@ -224,13 +231,6 @@ static void sampleAdsIfReady() {
 
   if (prevVa < 0.0f && va >= 0.0f) {
     const uint32_t nowUs = micros();
-    if (lastVaCrossUs != 0) {
-      const uint32_t periodUs = nowUs - lastVaCrossUs;
-      if (periodUs > 1000 && periodUs < 100000) {
-        const float freq = 1000000.0f / (float)periodUs;
-        meas.freq_hz = meas.freq_hz <= 1.0f ? freq : (meas.freq_hz * 0.85f + freq * 0.15f);
-      }
-    }
     lastVaCrossUs = nowUs;
     digitalWrite(PIN_SYNC_PULSE, HIGH);
     syncPulseReleaseUs = nowUs + SYNC_PULSE_US;
@@ -241,6 +241,12 @@ static void sampleAdsIfReady() {
 // -------------------------- MEASURE/CONTROL ----------------------------
 
 static void publishWindowMeasurements() {
+  FrequencyPllSnapshot pll = getFrequencySnapshot();
+  meas.freq_hz = pll.frequencyHz;
+  meas.rocof_hz_s = pll.rocofHzPerSec;
+  meas.phase_deg = pll.phaseRad * 57.2957795131f;
+  meas.pll_locked = pll.locked;
+
   if (accum.count == 0) return;
   const double inv = 1.0 / (double)accum.count;
   meas.va_rms = sqrt(accum.va2 * inv);
@@ -297,6 +303,9 @@ static void printTelemetry() {
   Serial.print(F(" drops=")); Serial.print((uint32_t)drdyDrops);
   Serial.print(F(" pend=")); Serial.print((uint32_t)drdyPending);
   Serial.print(F(" f=")); Serial.print(meas.freq_hz, 3);
+  Serial.print(F(" rocof=")); Serial.print(meas.rocof_hz_s, 3);
+  Serial.print(F(" phase=")); Serial.print(meas.phase_deg, 2);
+  Serial.print(F(" lock=")); Serial.print(meas.pll_locked ? 1 : 0);
   Serial.print(F(" va=")); Serial.print(meas.va_rms, 4);
   Serial.print(F(" vb=")); Serial.print(meas.vb_rms, 4);
   Serial.print(F(" vc=")); Serial.print(meas.vc_rms, 4);
@@ -392,6 +401,17 @@ void setup() {
 
   configureFieldPwm();
   adsSpi.begin(PIN_ADS_SCLK, PIN_ADS_MISO, PIN_ADS_MOSI, PIN_ADS_CS);
+  FrequencyPllConfig pllCfg;
+  pllCfg.sampleRate = NOMINAL_SAMPLE_RATE;
+  pllCfg.nominalFreqHz = 60.0f;
+  pllCfg.minFreqHz = 45.0f;
+  pllCfg.maxFreqHz = 65.0f;
+  pllCfg.pllBandwidthHz = 5.0f;
+  pllCfg.damping = 0.707f;
+  pllCfg.updateSamples = 32;
+  if (!initFrequency(pllCfg)) {
+    Serial.println(F("Frequency PLL init failed"));
+  }
   attachInterrupt(digitalPinToInterrupt(PIN_ADS_DRDY), onAdsDrdyFalling, FALLING);
 
   lastStatsMs = millis();

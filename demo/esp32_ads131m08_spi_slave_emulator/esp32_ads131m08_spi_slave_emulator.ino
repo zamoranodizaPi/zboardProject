@@ -74,8 +74,8 @@ static const uint8_t MAX_FRAME_WORDS = NUM_CHANNELS + 2; // status + 8 channels 
 static const uint16_t MAX_FRAME_BYTES = MAX_FRAME_WORDS * MAX_WORD_BYTES;
 static const uint32_t TIMER_BASE_HZ = 8000000;
 
-static uint8_t WORD_LENGTH = 24;              // 16, 24, or 32
-static uint32_t SAMPLE_RATE = 8000;           // 1000 to 32000 SPS
+static uint8_t WORD_LENGTH = 16;              // 16, 24, or 32
+static uint32_t SAMPLE_RATE = 16000;          // 1000 to 32000 SPS
 static uint32_t SPI_CLOCK_MAX_HZ = 10000000;  // informational limit for the master
 static uint8_t SPI_MODE = 0;                  // 0 to 3
 static bool ENABLE_CRC = false;

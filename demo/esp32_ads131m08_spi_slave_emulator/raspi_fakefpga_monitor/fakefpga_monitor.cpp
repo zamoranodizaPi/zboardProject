@@ -34,6 +34,9 @@ struct Telemetry {
   float fps = 0.0f;
   uint32_t bad = 0;
   float freq = 0.0f;
+  float rocof = 0.0f;
+  float phase = 0.0f;
+  bool lock = false;
   float va = 0.0f;
   float vb = 0.0f;
   float vc = 0.0f;
@@ -174,6 +177,9 @@ void parseTelemetry(const std::string &line, Telemetry *t) {
     else if (key == "fps") t->fps = f;
     else if (key == "bad") t->bad = std::strtoul(value.c_str(), nullptr, 10);
     else if (key == "f") t->freq = f;
+    else if (key == "rocof") t->rocof = f;
+    else if (key == "phase") t->phase = f;
+    else if (key == "lock") t->lock = value == "1";
     else if (key == "va") t->va = f;
     else if (key == "vb") t->vb = f;
     else if (key == "vc") t->vc = f;
@@ -271,12 +277,20 @@ void render(SDL_Renderer *r, const Telemetry &t, const std::string &line, int w,
   drawCard(r, 60 + card_w * 3, y, card_w, 104, "FIELD PWM", buf, {90, 230, 210, 255});
 
   y += 138;
-  drawCard(r, 24, y, card_w, 104, "RUN STATE", t.run ? "RUN" : "STOP", t.run ? ok : Color{255, 190, 80, 255});
-  drawCard(r, 36 + card_w, y, card_w, 104, "FIELD MODE", t.automatic ? "AUTO" : "MANUAL", {140, 180, 255, 255});
+  std::snprintf(buf, sizeof(buf), "%.1FDEG", t.phase);
+  drawCard(r, 24, y, card_w, 104, "PLL PHASE", buf, t.lock ? ok : Color{255, 190, 80, 255});
+  std::snprintf(buf, sizeof(buf), "%.2F", t.rocof);
+  drawCard(r, 36 + card_w, y, card_w, 104, "ROCOF HZ/S", buf, {140, 180, 255, 255});
+  drawCard(r, 48 + card_w * 2, y, card_w, 104, "PLL LOCK", t.lock ? "LOCK" : "WAIT", t.lock ? ok : Color{255, 190, 80, 255});
   std::snprintf(buf, sizeof(buf), "%.0FFPS", t.fps);
-  drawCard(r, 48 + card_w * 2, y, card_w, 104, "ADS FRAMES", buf, ok);
+  drawCard(r, 60 + card_w * 3, y, card_w, 104, "ADS FRAMES", buf, ok);
+
+  y += 116;
+  drawCard(r, 24, y, card_w, 82, "RUN STATE", t.run ? "RUN" : "STOP", t.run ? ok : Color{255, 190, 80, 255});
+  drawCard(r, 36 + card_w, y, card_w, 82, "FIELD MODE", t.automatic ? "AUTO" : "MANUAL", {140, 180, 255, 255});
   std::snprintf(buf, sizeof(buf), "%u", t.bad);
-  drawCard(r, 60 + card_w * 3, y, card_w, 104, "BAD FRAMES", buf, fault);
+  drawCard(r, 48 + card_w * 2, y, card_w, 82, "BAD FRAMES", buf, fault);
+  drawCard(r, 60 + card_w * 3, y, card_w, 82, "FAULT", t.fault ? "FAULT" : "CLEAR", fault);
 
   fillRect(r, SDL_Rect{24, h - 78, w - 48, 48}, {6, 10, 12, 245});
   drawRect(r, SDL_Rect{24, h - 78, w - 48, 48}, {42, 55, 58, 180});
