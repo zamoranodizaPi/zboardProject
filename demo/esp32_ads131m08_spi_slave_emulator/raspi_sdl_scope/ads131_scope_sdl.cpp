@@ -556,6 +556,8 @@ void processingThread(const Args args, ScopeState *state, const std::vector<Samp
       const uint64_t post = count - pre;
       const int mode = state->trigger_mode.load();
       const uint64_t newest_triggerable = latest > post + 2 ? latest - post - 1 : 1;
+      const uint64_t oldest_valid = latest > (kRingSize - 4) ? latest - (kRingSize - 4) : 1;
+      if (last_scan < oldest_valid) last_scan = oldest_valid;
       const uint64_t holdoff_samples =
           static_cast<uint64_t>((state->trigger_holdoff_ms.load() * args.sample_rate) / 1000.0f);
       bool triggered = false;
@@ -845,15 +847,18 @@ void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect
   drawPolyline(r, points.data(), static_cast<int>(point_count), width);
 }
 
-void drawTrigger(SDL_Renderer *r, const DisplayFrame &frame, SDL_Rect plot, ScopeState *state) {
+void drawTrigger(SDL_Renderer *r, const DisplayFrame &frame, SDL_Rect plot, ScopeState *state,
+                 const Args &args) {
+  const int trigger_channel = std::clamp(state->trigger_channel.load(), 0, args.channels - 1);
+  const SDL_Rect trigger_area = plotForChannel(plot, trigger_channel, state->view_mode.load());
   const float vdiv = std::max(0.02f, state->volts_per_div.load());
-  const float trig_y = plot.y + plot.h * 0.5f -
-                       state->trigger_level.load() * ((plot.h / 8.0f) / vdiv);
+  const float trig_y = trigger_area.y + trigger_area.h * 0.5f -
+                       state->trigger_level.load() * ((trigger_area.h / 8.0f) / vdiv);
   const float trig_x = plot.x + plot.w *
       (frame.count > 1 ? static_cast<float>(frame.trigger_index) / static_cast<float>(frame.count - 1)
                        : 0.30f);
   setColor(r, {255, 150, 55, 190});
-  thickLine(r, plot.x - 8, trig_y, plot.x + plot.w + 8, trig_y, 1);
+  thickLine(r, trigger_area.x - 8, trig_y, trigger_area.x + trigger_area.w + 8, trig_y, 1);
   setColor(r, {255, 190, 70, 165});
   thickLine(r, trig_x, plot.y, trig_x, plot.y + plot.h, 1);
   SDL_FPoint arrow[4] = {
@@ -863,7 +868,7 @@ void drawTrigger(SDL_Renderer *r, const DisplayFrame &frame, SDL_Rect plot, Scop
       {trig_x - 8.0f, static_cast<float>(plot.y + 2)},
   };
   SDL_RenderDrawLinesF(r, arrow, 4);
-  drawText(r, plot.x + plot.w - 64, static_cast<int>(trig_y) - 16, "TRIG",
+  drawText(r, trigger_area.x + trigger_area.w - 64, static_cast<int>(trig_y) - 16, "TRIG",
            {255, 170, 80, 205}, 1);
 }
 
@@ -1065,7 +1070,7 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   const bool draw_persistence = state->persistence.load() && (render_fps <= 1.0 || render_fps >= 55.0);
   if (draw_persistence) drawTraceLayer(r, args, state, previous, plot, 28, 1, false);
   drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
-  drawTrigger(r, frame, plot, state);
+  drawTrigger(r, frame, plot, state, args);
 
   if (state->view_mode.load() == VIEW_SPLIT) {
     drawText(r, plot.x + 12, plot.y + 10, "VOLTAGE", {112, 132, 136, 150}, 2);
