@@ -29,6 +29,7 @@ namespace {
 constexpr int kMaxChannels = 8;
 constexpr int kDisplayBuffers = 2;
 constexpr size_t kRingSize = 1u << 16;
+constexpr size_t kMaxRenderPoints = 8192;
 constexpr double kAdc24FullScale = 8388607.0;
 constexpr float kLineHz = 60.0f;
 constexpr float kVisibleCycles = 6.0f;
@@ -549,11 +550,6 @@ void thickLine(SDL_Renderer *r, float x1, float y1, float x2, float y2, int widt
   }
 }
 
-Color withAlpha(Color c, uint8_t a) {
-  c.a = a;
-  return c;
-}
-
 Color scaled(Color c, float factor, uint8_t alpha) {
   c.r = static_cast<uint8_t>(std::clamp(c.r * factor, 0.0f, 255.0f));
   c.g = static_cast<uint8_t>(std::clamp(c.g * factor, 0.0f, 255.0f));
@@ -630,10 +626,6 @@ void drawText(SDL_Renderer *r, int x, int y, const char *text, Color color, int 
     }
     cx += 7 * scale;
   }
-}
-
-void drawText(SDL_Renderer *r, int x, int y, const std::string &text, Color color, int scale = 2) {
-  drawText(r, x, y, text.c_str(), color, scale);
 }
 
 void fillRect(SDL_Renderer *r, SDL_Rect rect, Color color) {
@@ -740,24 +732,35 @@ float groupPeak(const DisplayFrame &frame, int channel, int mode, int channels) 
   return peak;
 }
 
+void drawPolyline(SDL_Renderer *r, SDL_FPoint *points, int count, int width) {
+  if (count < 2) return;
+  if (width <= 1) {
+    SDL_RenderDrawLinesF(r, points, count);
+    return;
+  }
+  for (int o = -width / 2; o <= width / 2; ++o) {
+    for (int i = 0; i < count; ++i) points[i].y += static_cast<float>(o);
+    SDL_RenderDrawLinesF(r, points, count);
+    for (int i = 0; i < count; ++i) points[i].y -= static_cast<float>(o);
+  }
+}
+
 void drawTrace(SDL_Renderer *r, const DisplayFrame &frame, int channel, SDL_Rect area,
                float vdiv, float peak, Color color, int width) {
   if (frame.count < 2) return;
+  static thread_local std::array<SDL_FPoint, kMaxRenderPoints> points;
+  const size_t point_count = std::min(frame.count, kMaxRenderPoints);
   const float center = area.y + area.h * 0.5f;
   const float manual_scale = (area.h / 8.0f) / std::max(0.02f, vdiv);
   const float auto_scale = (area.h * kTraceUseHeight * 0.5f) / std::max(0.05f, peak);
   const float scale = std::min(manual_scale, auto_scale);
-  const float step = static_cast<float>(area.w) / static_cast<float>(frame.count - 1);
-  float last_x = area.x;
-  float last_y = center - frame.samples[0].ch[channel] * scale;
+  const float step = static_cast<float>(area.w) / static_cast<float>(point_count - 1);
   setColor(r, color);
-  for (size_t i = 1; i < frame.count; ++i) {
-    float x = area.x + step * static_cast<float>(i);
-    float y = center - frame.samples[i].ch[channel] * scale;
-    thickLine(r, last_x, last_y, x, y, width);
-    last_x = x;
-    last_y = y;
+  for (size_t i = 0; i < point_count; ++i) {
+    points[i].x = area.x + step * static_cast<float>(i);
+    points[i].y = center - frame.samples[i].ch[channel] * scale;
   }
+  drawPolyline(r, points.data(), static_cast<int>(point_count), width);
 }
 
 void drawTrigger(SDL_Renderer *r, SDL_Rect plot, ScopeState *state) {
@@ -903,8 +906,7 @@ void drawUi(SDL_Renderer *r, const Args &args, ScopeState *state, const DisplayF
   fillRect(r, plot, {0, 0, 0, 255});
   drawGrid(r, cache, plot, state->show_grid.load());
 
-  if (state->persistence.load()) drawTraceLayer(r, args, state, previous, plot, 42, 1, false);
-  drawTraceLayer(r, args, state, frame, plot, 120, 2, true);
+  if (state->persistence.load()) drawTraceLayer(r, args, state, previous, plot, 28, 1, false);
   drawTraceLayer(r, args, state, frame, plot, 245, 1, false);
   drawTrigger(r, plot, state);
 
