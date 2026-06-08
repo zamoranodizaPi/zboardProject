@@ -223,14 +223,6 @@ void configureEsp32(int fd, const Args &args) {
   serialCommand(fd, "SYNCSTART");
 }
 
-void wallSecondSyncThread(int serial_fd, ScopeState *state) {
-  while (state->running.load(std::memory_order_relaxed)) {
-    waitForNextWallSecond();
-    if (!state->running.load(std::memory_order_relaxed)) break;
-    serialCommand(serial_fd, "SYNCSILENT");
-  }
-}
-
 int openSpi(const Args &args) {
   int fd = ::open(args.spi_dev.c_str(), O_RDWR);
   if (fd < 0) return -1;
@@ -796,13 +788,11 @@ int main(int argc, char **argv) {
   std::thread acq(acquisitionThread, args, &state, &ring);
   std::thread proc(processingThread, args, &state, &ring, &display);
   std::thread rend(renderThread, args, &state, &display);
-  std::thread sync(wallSecondSyncThread, serial, &state);
 
   rend.join();
   state.running = false;
   acq.join();
   proc.join();
-  sync.join();
   serialCommand(serial, "STOP");
   if (serial >= 0) ::close(serial);
   return 0;

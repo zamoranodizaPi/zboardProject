@@ -138,6 +138,7 @@ static RuntimeStats stats;
 static uint8_t currentFrame[MAX_FRAME_BYTES];
 static volatile uint16_t currentFrameBytes = 0;
 static volatile uint32_t frameSequence = 0;
+static volatile uint32_t phaseSyncUs = 0;
 static volatile uint32_t drdyReleaseAtUs = 0;
 
 DMA_ATTR static uint8_t txBuffers[SPI_QUEUE_DEPTH][MAX_FRAME_BYTES];
@@ -211,10 +212,11 @@ static void updateChannelPhaseSteps() {
   }
 }
 
-static uint32_t phaseFromDegrees(float degrees) {
-  while (degrees < 0.0f) degrees += 360.0f;
-  while (degrees >= 360.0f) degrees -= 360.0f;
-  return (uint32_t)((degrees / 360.0f) * 4294967296.0f);
+static uint32_t phaseFromTime(float freqHz, float phaseOffsetDeg) {
+  const uint32_t elapsedUs = micros() - phaseSyncUs;
+  const double cycles = ((double)elapsedUs * (double)freqHz) / 1000000.0;
+  const double offset = (double)phaseOffsetDeg / 360.0;
+  return (uint32_t)((cycles + offset) * 4294967296.0);
 }
 
 // ------------------------- SAMPLE GENERATION --------------------------
@@ -233,15 +235,13 @@ static int32_t generateChannelSample(uint8_t chIndex) {
       return clamp24((int64_t)ch.counter + ch.offset);
 
     case SIGNAL_SINE: {
-      ch.phase += ch.phaseStep;
-      uint32_t phaseWithOffset = ch.phase + phaseFromDegrees(ch.phaseOffsetDeg);
+      uint32_t phaseWithOffset = phaseFromTime(ch.sineFreqHz, ch.phaseOffsetDeg);
       const float radians = ((float)phaseWithOffset / 4294967296.0f) * TWO_PI;
       return clamp24((int64_t)(sinf(radians) * (float)amp) + ch.offset);
     }
 
     case SIGNAL_TRIANGLE: {
-      ch.phase += ch.phaseStep;
-      uint32_t p = ch.phase + phaseFromDegrees(ch.phaseOffsetDeg);
+      uint32_t p = phaseFromTime(ch.sineFreqHz, ch.phaseOffsetDeg);
       int32_t tri = (p < 0x80000000u)
                       ? (int32_t)(p >> 7) - 0x800000
                       : 0x7FFFFF - (int32_t)((p - 0x80000000u) >> 7);
@@ -445,8 +445,9 @@ static void startStreaming() {
 }
 
 static void syncPhaseToVaZeroCrossing(bool report) {
+  phaseSyncUs = micros();
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-    channels[ch].phase = 0u - channels[ch].phaseStep;
+    channels[ch].phase = 0;
     channels[ch].counter = 0;
   }
   frameSequence = 0;
@@ -668,6 +669,7 @@ void setup() {
 
   pinMode(DRDY_PIN, OUTPUT);
   digitalWrite(DRDY_PIN, drdyInactiveLevel());
+  phaseSyncUs = micros();
 
   initializeChannels(SIGNAL_SINE);
   currentFrameBytes = frameBytes();
