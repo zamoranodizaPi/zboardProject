@@ -284,7 +284,7 @@ int openSpi(const Args &args) {
 }
 
 bool spiTransfer(int fd, uint32_t hz, const std::vector<uint8_t> &tx, std::vector<uint8_t> &rx) {
-  rx.assign(tx.size(), 0);
+  std::fill(rx.begin(), rx.end(), 0);
   spi_ioc_transfer tr{};
   tr.tx_buf = reinterpret_cast<uintptr_t>(tx.data());
   tr.rx_buf = reinterpret_cast<uintptr_t>(rx.data());
@@ -439,9 +439,7 @@ void acquisitionThread(const Args args, ScopeState *state, std::vector<Sample> *
       state->errors.fetch_add(1, std::memory_order_relaxed);
     }
 
-    if (drdy >= 0) {
-      waitForDrdyInactive(drdy, 2000);
-    } else {
+    if (drdy < 0) {
       next += std::chrono::microseconds(1000000 / std::max(1, args.sample_rate));
       std::this_thread::sleep_until(next);
       if (std::chrono::steady_clock::now() > next + std::chrono::milliseconds(50)) {
