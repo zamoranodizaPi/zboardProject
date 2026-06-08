@@ -29,6 +29,7 @@
     STOP
     CONFIG
     STATS
+    AUTOSTATS ON|OFF
 */
 
 #include <Arduino.h>
@@ -77,6 +78,7 @@ static uint32_t SAMPLE_RATE = 4000;           // 1000 to 32000 SPS
 static uint32_t SPI_CLOCK_MAX_HZ = 10000000;  // informational limit for the master
 static uint8_t SPI_MODE = 0;                  // 0 to 3
 static bool ENABLE_CRC = false;
+static bool AUTO_PRINT_STATS = false;
 
 static const float DEFAULT_SINE_FREQ_HZ = 60.0f;
 static const float DEFAULT_AMPLITUDE = 0.8f;  // fraction of 24-bit full-scale
@@ -531,6 +533,7 @@ static void printConfig() {
   Serial.print(F("SPI_MODE=")); Serial.println(SPI_MODE);
   Serial.print(F("CHANNELS=")); Serial.println(NUM_CHANNELS);
   Serial.print(F("ENABLE_CRC=")); Serial.println(ENABLE_CRC ? F("true") : F("false"));
+  Serial.print(F("AUTO_PRINT_STATS=")); Serial.println(AUTO_PRINT_STATS ? F("true") : F("false"));
   Serial.print(F("FRAME_BYTES=")); Serial.println(frameBytes());
   Serial.print(F("DRDY_PIN=")); Serial.println(DRDY_PIN);
   Serial.print(F("DRDY_MODE=")); Serial.println(DRDY_PULSE_MODE ? F("PULSE") : F("LEVEL"));
@@ -573,7 +576,9 @@ static void updateStats() {
   stats.lastStatsMs = now;
   stats.buildMicrosAccum = 0;
 
-  printStats();
+  if (AUTO_PRINT_STATS) {
+    printStats();
+  }
 }
 
 static void handleCommand(char *line) {
@@ -641,6 +646,17 @@ static void handleCommand(char *line) {
     printConfig();
   } else if (!strcasecmp(cmd, "STATS")) {
     printStats();
+  } else if (!strcasecmp(cmd, "AUTOSTATS")) {
+    char *arg = strtok(nullptr, " \t\r\n");
+    if (arg && (!strcasecmp(arg, "ON") || !strcasecmp(arg, "TRUE") || !strcmp(arg, "1"))) {
+      AUTO_PRINT_STATS = true;
+      Serial.println(F("OK"));
+    } else if (arg && (!strcasecmp(arg, "OFF") || !strcasecmp(arg, "FALSE") || !strcmp(arg, "0"))) {
+      AUTO_PRINT_STATS = false;
+      Serial.println(F("OK"));
+    } else {
+      Serial.println(F("ERR AUTOSTATS expects ON or OFF"));
+    }
   } else {
     Serial.println(F("ERR unknown command"));
   }
