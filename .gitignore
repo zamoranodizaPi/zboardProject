@@ -20,3 +20,5 @@ dfx_runtime.txt
 *.d
 __pycache__/
 *.pyc
+tmp_*
+*.tsbuildinfo

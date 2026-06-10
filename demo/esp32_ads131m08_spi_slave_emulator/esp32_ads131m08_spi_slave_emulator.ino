@@ -25,6 +25,9 @@
     CRC ON|OFF
     MODE CONSTANT|COUNTER|SINE|TRIANGLE|RANDOM
     CH <0..7> CONSTANT|COUNTER|SINE|TRIANGLE|RANDOM [value]
+    CHCFG <0..7> <freq_hz> <amplitude_0_to_0.95> <phase_deg> [offset]
+    PLANT <speed_pct> <slip_hz> <current_scale> <field_a> <field_v> <discharge_a> <load_pct> <pullout_risk>
+    PROFILE GRID_NORMAL|PHASE_LOSS_A|PHASE_LOSS_B|PHASE_LOSS_C|VOLTAGE_SAG|UNBALANCE|LOW_PF|FREQ_STEP|START_PROFILE|PULLOUT|NO_SIGNAL
     START
     STOP
     CONFIG
@@ -75,7 +78,7 @@ static const uint16_t MAX_FRAME_BYTES = MAX_FRAME_WORDS * MAX_WORD_BYTES;
 static const uint32_t TIMER_BASE_HZ = 8000000;
 
 static uint8_t WORD_LENGTH = 16;              // 16, 24, or 32
-static uint32_t SAMPLE_RATE = 16000;          // 1000 to 32000 SPS
+static uint32_t SAMPLE_RATE = 8000;           // 1000 to 32000 SPS
 static uint32_t SPI_CLOCK_MAX_HZ = 10000000;  // informational limit for the master
 static uint8_t SPI_MODE = 0;                  // 0 to 3
 static bool ENABLE_CRC = false;
@@ -101,6 +104,20 @@ enum SignalMode : uint8_t {
   SIGNAL_SINE,
   SIGNAL_TRIANGLE,
   SIGNAL_RANDOM
+};
+
+enum ElectricalProfile : uint8_t {
+  PROFILE_GRID_NORMAL = 0,
+  PROFILE_PHASE_LOSS_A,
+  PROFILE_PHASE_LOSS_B,
+  PROFILE_PHASE_LOSS_C,
+  PROFILE_VOLTAGE_SAG,
+  PROFILE_UNBALANCE,
+  PROFILE_LOW_PF,
+  PROFILE_FREQ_STEP,
+  PROFILE_START_PROFILE,
+  PROFILE_PULLOUT,
+  PROFILE_NO_SIGNAL
 };
 
 struct ChannelConfig {
@@ -153,8 +170,13 @@ static spi_slave_transaction_t spiTransactions[SPI_QUEUE_DEPTH];
 static bool spiStarted = false;
 static volatile bool spiTransactionInFlight = false;
 
-static char serialLine[96];
+static char serialLine[160];
 static uint8_t serialLineLen = 0;
+static ElectricalProfile activeProfile = PROFILE_GRID_NORMAL;
+static uint32_t profileStartMs = 0;
+static uint32_t lastProfileUpdateMs = 0;
+static bool plantDriven = false;
+static uint32_t lastPlantDriveMs = 0;
 
 static hw_timer_t *sampleTimer = nullptr;
 static portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -198,10 +220,49 @@ static bool parseSignalMode(const char *text, SignalMode &mode) {
   return true;
 }
 
+static const char *profileName(ElectricalProfile profile) {
+  switch (profile) {
+    case PROFILE_GRID_NORMAL: return "GRID_NORMAL";
+    case PROFILE_PHASE_LOSS_A: return "PHASE_LOSS_A";
+    case PROFILE_PHASE_LOSS_B: return "PHASE_LOSS_B";
+    case PROFILE_PHASE_LOSS_C: return "PHASE_LOSS_C";
+    case PROFILE_VOLTAGE_SAG: return "VOLTAGE_SAG";
+    case PROFILE_UNBALANCE: return "UNBALANCE";
+    case PROFILE_LOW_PF: return "LOW_PF";
+    case PROFILE_FREQ_STEP: return "FREQ_STEP";
+    case PROFILE_START_PROFILE: return "START_PROFILE";
+    case PROFILE_PULLOUT: return "PULLOUT";
+    case PROFILE_NO_SIGNAL: return "NO_SIGNAL";
+  }
+  return "GRID_NORMAL";
+}
+
+static bool parseElectricalProfile(const char *text, ElectricalProfile &profile) {
+  if (!strcasecmp(text, "GRID_NORMAL") || !strcasecmp(text, "NORMAL")) profile = PROFILE_GRID_NORMAL;
+  else if (!strcasecmp(text, "PHASE_LOSS_A") || !strcasecmp(text, "LOSS_A")) profile = PROFILE_PHASE_LOSS_A;
+  else if (!strcasecmp(text, "PHASE_LOSS_B") || !strcasecmp(text, "LOSS_B")) profile = PROFILE_PHASE_LOSS_B;
+  else if (!strcasecmp(text, "PHASE_LOSS_C") || !strcasecmp(text, "LOSS_C")) profile = PROFILE_PHASE_LOSS_C;
+  else if (!strcasecmp(text, "VOLTAGE_SAG") || !strcasecmp(text, "SAG")) profile = PROFILE_VOLTAGE_SAG;
+  else if (!strcasecmp(text, "UNBALANCE") || !strcasecmp(text, "IMBALANCE")) profile = PROFILE_UNBALANCE;
+  else if (!strcasecmp(text, "LOW_PF") || !strcasecmp(text, "LOWPF")) profile = PROFILE_LOW_PF;
+  else if (!strcasecmp(text, "FREQ_STEP") || !strcasecmp(text, "FREQ")) profile = PROFILE_FREQ_STEP;
+  else if (!strcasecmp(text, "START_PROFILE") || !strcasecmp(text, "STARTING")) profile = PROFILE_START_PROFILE;
+  else if (!strcasecmp(text, "PULLOUT")) profile = PROFILE_PULLOUT;
+  else if (!strcasecmp(text, "NO_SIGNAL") || !strcasecmp(text, "ABSENT")) profile = PROFILE_NO_SIGNAL;
+  else return false;
+  return true;
+}
+
 static int32_t clamp24(int64_t value) {
   if (value > 0x7FFFFF) return 0x7FFFFF;
   if (value < -0x800000) return -0x800000;
   return (int32_t)value;
+}
+
+static float clampf(float value, float lo, float hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
 }
 
 static uint32_t xorshift32() {
@@ -294,14 +355,24 @@ static void packWord(uint8_t *dst, int32_t sample24) {
   }
 }
 
+static void packStatusWord(uint8_t *dst, uint32_t seq) {
+  if (WORD_LENGTH == 16) {
+    const uint16_t status = (uint16_t)(0x5000u | (seq & 0x0FFFu));
+    dst[0] = (uint8_t)((status >> 8) & 0xFF);
+    dst[1] = (uint8_t)(status & 0xFF);
+  } else {
+    int32_t status = (int32_t)(0x050000 | (seq & 0xFFFF)); // recognizable status marker + sequence
+    packWord(dst, status);
+  }
+}
+
 static uint16_t buildFrame(uint8_t *frame) {
   const uint32_t startUs = micros();
   const uint8_t bytes = wordBytes();
   uint8_t *p = frame;
   uint32_t seq = frameSequence++;
 
-  int32_t status = (int32_t)(0x050000 | (seq & 0xFFFF)); // recognizable status marker + sequence
-  packWord(p, status);
+  packStatusWord(p, seq);
   p += bytes;
 
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
@@ -447,6 +518,8 @@ static bool startSpi() {
 
 // -------------------------- RUNTIME CONTROL ---------------------------
 
+static void syncPhaseToVaZeroCrossing();
+
 static void initializeChannels(SignalMode mode) {
   const float voltagePhaseDeg[4] = {0.0f, -120.0f, 120.0f, 0.0f};
   const float currentPhaseDeg[4] = {
@@ -468,7 +541,191 @@ static void initializeChannels(SignalMode mode) {
   }
   channels[7].mode = SIGNAL_CONSTANT; // balanced three-phase neutral current is nominally zero
   channels[7].amplitude = 0.0f;
+    updateChannelPhaseSteps();
+  }
+
+static void setSineChannel(uint8_t ch, float freqHz, float amplitude, float phaseDeg, int32_t offset = 0) {
+  if (ch >= NUM_CHANNELS) return;
+  channels[ch].mode = amplitude > 0.0f ? SIGNAL_SINE : SIGNAL_CONSTANT;
+  channels[ch].constantValue = 0;
+  channels[ch].sineFreqHz = clampf(freqHz, 0.01f, 400.0f);
+  channels[ch].amplitude = clampf(amplitude, 0.0f, 0.95f);
+  channels[ch].phaseOffsetDeg = phaseDeg;
+  channels[ch].offset = offset;
+  channels[ch].phase = 0;
+  channels[ch].counter = 0;
+}
+
+static void setThreePhaseProfile(float freqHz,
+                                 float vaAmp, float vbAmp, float vcAmp,
+                                 float iaAmp, float ibAmp, float icAmp,
+                                 float pfLagDeg) {
+  setSineChannel(0, freqHz, vaAmp, 0.0f);
+  setSineChannel(1, freqHz, vbAmp, -120.0f);
+  setSineChannel(2, freqHz, vcAmp, 120.0f);
+  setSineChannel(3, freqHz, vaAmp, 0.0f);
+  setSineChannel(4, freqHz, iaAmp, -pfLagDeg);
+  setSineChannel(5, freqHz, ibAmp, -120.0f - pfLagDeg);
+  setSineChannel(6, freqHz, icAmp, 120.0f - pfLagDeg);
+  setSineChannel(7, freqHz, 0.0f, 0.0f);
+}
+
+static void updateSineChannel(uint8_t ch, float freqHz, float amplitude, float phaseDeg, int32_t offset = 0) {
+  if (ch >= NUM_CHANNELS) return;
+  channels[ch].mode = amplitude > 0.0f ? SIGNAL_SINE : SIGNAL_CONSTANT;
+  channels[ch].constantValue = 0;
+  channels[ch].sineFreqHz = clampf(freqHz, 0.01f, 400.0f);
+  channels[ch].amplitude = clampf(amplitude, 0.0f, 0.95f);
+  channels[ch].phaseOffsetDeg = phaseDeg;
+  channels[ch].offset = offset;
+}
+
+static void updateThreePhaseRuntime(float freqHz,
+                                    float vaAmp, float vbAmp, float vcAmp,
+                                    float iaAmp, float ibAmp, float icAmp,
+                                    float pfLagDeg,
+                                    float neutralAmp = 0.0f) {
+  updateSineChannel(0, freqHz, vaAmp, 0.0f);
+  updateSineChannel(1, freqHz, vbAmp, -120.0f);
+  updateSineChannel(2, freqHz, vcAmp, 120.0f);
+  updateSineChannel(3, freqHz, vaAmp, 0.0f);
+  updateSineChannel(4, freqHz, iaAmp, -pfLagDeg);
+  updateSineChannel(5, freqHz, ibAmp, -120.0f - pfLagDeg);
+  updateSineChannel(6, freqHz, icAmp, 120.0f - pfLagDeg);
+  updateSineChannel(7, freqHz, neutralAmp, -pfLagDeg);
   updateChannelPhaseSteps();
+}
+
+static void applyPlantDrive(float speedPct,
+                            float slipHz,
+                            float currentScale,
+                            float fieldA,
+                            float fieldV,
+                            float dischargeA,
+                            float loadPct,
+                            float pulloutRisk) {
+  const float speed = clampf(speedPct, 0.0f, 100.0f);
+  const float slip = clampf(slipHz, 0.0f, 60.0f);
+  const float currentPu = clampf(currentScale, 0.0f, 2.6f);
+  const float fieldPu = clampf(fieldA / 5.5f, 0.0f, 1.4f);
+  const float loadPu = clampf(loadPct / 100.0f, 0.0f, 1.2f);
+  const float risk = clampf(pulloutRisk, 0.0f, 1.0f);
+  const bool energized = speed > 0.2f || currentPu > 0.05f || fieldA > 0.05f || dischargeA > 0.05f;
+
+  const float freqHz = 60.0f - 0.18f * risk;
+  const float vSag = energized ? 0.06f * clampf(currentPu - 1.0f, 0.0f, 1.4f) : 0.0f;
+  const float vAmp = clampf(0.80f - vSag + 0.015f * fieldPu, 0.58f, 0.84f);
+  const float baseCurrent = energized ? 0.52f * currentPu : 0.0f;
+  const float iAmp = clampf(baseCurrent + 0.035f * loadPu + 0.12f * risk, 0.0f, 0.95f);
+
+  float pfLagDeg = 62.0f - 34.0f * fieldPu + 11.0f * loadPu + 0.16f * slip;
+  pfLagDeg += 54.0f * risk;
+  pfLagDeg = clampf(pfLagDeg, 4.0f, 115.0f);
+
+  const float unbalance = clampf(risk * 0.12f + dischargeA * 0.012f, 0.0f, 0.22f);
+  const float iaAmp = clampf(iAmp * (1.0f + 0.30f * risk), 0.0f, 0.95f);
+  const float ibAmp = clampf(iAmp * (1.0f - unbalance), 0.0f, 0.95f);
+  const float icAmp = clampf(iAmp * (1.0f + 0.5f * unbalance), 0.0f, 0.95f);
+  const float neutralAmp = clampf(0.015f * fieldA + 0.075f * dischargeA + 0.12f * risk, 0.0f, 0.35f);
+
+  const int32_t fieldOffset = (int32_t)clampf((fieldV / 150.0f) * 1800000.0f, -1800000.0f, 1800000.0f);
+  updateSineChannel(0, freqHz, vAmp, 0.0f);
+  updateSineChannel(1, freqHz, vAmp, -120.0f);
+  updateSineChannel(2, freqHz, vAmp, 120.0f);
+  updateSineChannel(3, freqHz, 0.10f * fieldPu, 0.0f, fieldOffset);
+  updateSineChannel(4, freqHz, iaAmp, -pfLagDeg);
+  updateSineChannel(5, freqHz, ibAmp, -120.0f - pfLagDeg);
+  updateSineChannel(6, freqHz, icAmp, 120.0f - pfLagDeg);
+  updateSineChannel(7, freqHz, neutralAmp, -pfLagDeg);
+  updateChannelPhaseSteps();
+  plantDriven = true;
+  lastPlantDriveMs = millis();
+}
+
+static float smoothStep01(float x) {
+  x = clampf(x, 0.0f, 1.0f);
+  return x * x * (3.0f - 2.0f * x);
+}
+
+static bool applyElectricalProfile(ElectricalProfile profile) {
+  activeProfile = profile;
+  plantDriven = false;
+  profileStartMs = millis();
+  lastProfileUpdateMs = 0;
+  switch (profile) {
+    case PROFILE_GRID_NORMAL:
+      setThreePhaseProfile(60.0f, 0.80f, 0.80f, 0.80f, 0.55f, 0.55f, 0.55f, 30.0f);
+      break;
+    case PROFILE_PHASE_LOSS_A:
+      setThreePhaseProfile(60.0f, 0.0f, 0.80f, 0.80f, 0.0f, 0.55f, 0.55f, 30.0f);
+      break;
+    case PROFILE_PHASE_LOSS_B:
+      setThreePhaseProfile(60.0f, 0.80f, 0.0f, 0.80f, 0.55f, 0.0f, 0.55f, 30.0f);
+      break;
+    case PROFILE_PHASE_LOSS_C:
+      setThreePhaseProfile(60.0f, 0.80f, 0.80f, 0.0f, 0.55f, 0.55f, 0.0f, 30.0f);
+      break;
+    case PROFILE_VOLTAGE_SAG:
+      setThreePhaseProfile(60.0f, 0.48f, 0.48f, 0.48f, 0.62f, 0.62f, 0.62f, 35.0f);
+      break;
+    case PROFILE_UNBALANCE:
+      setThreePhaseProfile(60.0f, 0.82f, 0.66f, 0.91f, 0.58f, 0.47f, 0.64f, 30.0f);
+      break;
+    case PROFILE_LOW_PF:
+      setThreePhaseProfile(60.0f, 0.80f, 0.80f, 0.80f, 0.58f, 0.58f, 0.58f, 65.0f);
+      break;
+    case PROFILE_FREQ_STEP:
+      setThreePhaseProfile(59.0f, 0.80f, 0.80f, 0.80f, 0.55f, 0.55f, 0.55f, 30.0f);
+      break;
+    case PROFILE_START_PROFILE:
+      setThreePhaseProfile(60.0f, 0.64f, 0.64f, 0.64f, 0.84f, 0.84f, 0.84f, 48.0f);
+      break;
+    case PROFILE_PULLOUT:
+      setSineChannel(0, 60.0f, 0.80f, 0.0f);
+      setSineChannel(1, 60.0f, 0.80f, -120.0f);
+      setSineChannel(2, 60.0f, 0.80f, 120.0f);
+      setSineChannel(3, 60.0f, 0.80f, 0.0f);
+      setSineChannel(4, 60.0f, 0.82f, -105.0f);
+      setSineChannel(5, 60.0f, 0.82f, 135.0f);
+      setSineChannel(6, 60.0f, 0.82f, 15.0f);
+      setSineChannel(7, 60.0f, 0.12f, -30.0f);
+      break;
+    case PROFILE_NO_SIGNAL:
+      for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+        setSineChannel(ch, 60.0f, 0.0f, 0.0f);
+      }
+      break;
+  }
+  updateChannelPhaseSteps();
+  syncPhaseToVaZeroCrossing();
+  return true;
+}
+
+static void serviceElectricalProfileDynamics() {
+  if (plantDriven && millis() - lastPlantDriveMs < 1000) return;
+  if (plantDriven && millis() - lastPlantDriveMs >= 1000) plantDriven = false;
+  if (activeProfile != PROFILE_START_PROFILE && activeProfile != PROFILE_PULLOUT) return;
+  const uint32_t now = millis();
+  if (lastProfileUpdateMs != 0 && now - lastProfileUpdateMs < 20) return;
+  lastProfileUpdateMs = now;
+
+  if (activeProfile == PROFILE_START_PROFILE) {
+    const float p = smoothStep01((float)(now - profileStartMs) / 5200.0f);
+    const float vAmp = 0.64f + 0.16f * p;
+    const float iAmp = 0.84f - 0.29f * p;
+    const float pfLagDeg = 48.0f - 18.0f * p;
+    const float neutralAmp = 0.06f * (1.0f - p);
+    updateThreePhaseRuntime(60.0f, vAmp, vAmp, vAmp, iAmp, iAmp, iAmp, pfLagDeg, neutralAmp);
+  } else if (activeProfile == PROFILE_PULLOUT) {
+    const uint32_t age = now - profileStartMs;
+    const float p = age < 2200 ? 0.0f : smoothStep01((float)(age - 2200) / 4200.0f);
+    const float vAmp = 0.80f - 0.06f * p;
+    const float iAmp = 0.55f + 0.30f * p;
+    const float pfLagDeg = 30.0f + 82.0f * p;
+    const float neutralAmp = 0.02f + 0.16f * p;
+    const float freqHz = 60.0f - 0.35f * p;
+    updateThreePhaseRuntime(freqHz, vAmp, vAmp, vAmp, iAmp, iAmp, iAmp, pfLagDeg, neutralAmp);
+  }
 }
 
 static void startStreaming() {
@@ -554,10 +811,11 @@ static void printConfig() {
   Serial.print(F("SPI_MAX_HZ=")); Serial.println(SPI_CLOCK_MAX_HZ);
   Serial.print(F("SPI_MODE=")); Serial.println(SPI_MODE);
   Serial.print(F("CHANNELS=")); Serial.println(NUM_CHANNELS);
-  Serial.print(F("ENABLE_CRC=")); Serial.println(ENABLE_CRC ? F("true") : F("false"));
-  Serial.print(F("AUTO_PRINT_STATS=")); Serial.println(AUTO_PRINT_STATS ? F("true") : F("false"));
-  Serial.print(F("AUTO_START_ON_BOOT=")); Serial.println(AUTO_START_ON_BOOT ? F("true") : F("false"));
-  Serial.print(F("FRAME_BYTES=")); Serial.println(frameBytes());
+    Serial.print(F("ENABLE_CRC=")); Serial.println(ENABLE_CRC ? F("true") : F("false"));
+    Serial.print(F("AUTO_PRINT_STATS=")); Serial.println(AUTO_PRINT_STATS ? F("true") : F("false"));
+    Serial.print(F("AUTO_START_ON_BOOT=")); Serial.println(AUTO_START_ON_BOOT ? F("true") : F("false"));
+    Serial.print(F("PROFILE=")); Serial.println(profileName(activeProfile));
+    Serial.print(F("FRAME_BYTES=")); Serial.println(frameBytes());
   Serial.print(F("FRAME_QUEUE_DEPTH=")); Serial.println(FRAME_QUEUE_DEPTH);
   Serial.print(F("DRDY_PIN=")); Serial.println(DRDY_PIN);
   Serial.print(F("DRDY_MODE=")); Serial.println(DRDY_PULSE_MODE ? F("PULSE") : F("LEVEL"));
@@ -667,8 +925,52 @@ static void handleCommand(char *line) {
     } else {
       Serial.println(F("ERR CH expects: CH <0..7> <MODE> [value]"));
     }
-  } else if (!strcasecmp(cmd, "START")) {
-    startStreaming();
+  } else if (!strcasecmp(cmd, "CHCFG")) {
+    char *chArg = strtok(nullptr, " \t\r\n");
+    char *freqArg = strtok(nullptr, " \t\r\n");
+    char *ampArg = strtok(nullptr, " \t\r\n");
+    char *phaseArg = strtok(nullptr, " \t\r\n");
+    char *offsetArg = strtok(nullptr, " \t\r\n");
+    int ch = chArg ? atoi(chArg) : -1;
+    if (ch >= 0 && ch < NUM_CHANNELS && freqArg && ampArg && phaseArg) {
+      channels[ch].mode = SIGNAL_SINE;
+      channels[ch].sineFreqHz = clampf(atof(freqArg), 0.01f, 400.0f);
+      channels[ch].amplitude = clampf(atof(ampArg), 0.0f, 0.95f);
+      channels[ch].phaseOffsetDeg = atof(phaseArg);
+      channels[ch].offset = offsetArg ? atol(offsetArg) : 0;
+      channels[ch].phase = 0;
+      updateChannelPhaseSteps();
+      Serial.println(F("OK"));
+      } else {
+        Serial.println(F("ERR CHCFG expects: CHCFG <0..7> <freq_hz> <amp> <phase_deg> [offset]"));
+      }
+    } else if (!strcasecmp(cmd, "PLANT")) {
+      char *speedArg = strtok(nullptr, " \t\r\n");
+      char *slipArg = strtok(nullptr, " \t\r\n");
+      char *scaleArg = strtok(nullptr, " \t\r\n");
+      char *fieldAArg = strtok(nullptr, " \t\r\n");
+      char *fieldVArg = strtok(nullptr, " \t\r\n");
+      char *dischargeArg = strtok(nullptr, " \t\r\n");
+      char *loadArg = strtok(nullptr, " \t\r\n");
+      char *riskArg = strtok(nullptr, " \t\r\n");
+      if (speedArg && slipArg && scaleArg && fieldAArg && fieldVArg && dischargeArg && loadArg && riskArg) {
+        applyPlantDrive(atof(speedArg), atof(slipArg), atof(scaleArg), atof(fieldAArg),
+                        atof(fieldVArg), atof(dischargeArg), atof(loadArg), atof(riskArg));
+        Serial.println(F("OK PLANT"));
+      } else {
+        Serial.println(F("ERR PLANT expects: PLANT <speed_pct> <slip_hz> <current_scale> <field_a> <field_v> <discharge_a> <load_pct> <pullout_risk>"));
+      }
+    } else if (!strcasecmp(cmd, "PROFILE")) {
+      char *arg = strtok(nullptr, " \t\r\n");
+      ElectricalProfile profile;
+      if (arg && parseElectricalProfile(arg, profile) && applyElectricalProfile(profile)) {
+        Serial.print(F("OK PROFILE "));
+        Serial.println(profileName(activeProfile));
+      } else {
+        Serial.println(F("ERR PROFILE expects GRID_NORMAL, PHASE_LOSS_A/B/C, VOLTAGE_SAG, UNBALANCE, LOW_PF, FREQ_STEP, START_PROFILE, PULLOUT, or NO_SIGNAL"));
+      }
+    } else if (!strcasecmp(cmd, "START")) {
+      startStreaming();
   } else if (!strcasecmp(cmd, "SYNC")) {
     syncPhaseToVaZeroCrossing();
   } else if (!strcasecmp(cmd, "SYNCSTART")) {
@@ -743,6 +1045,7 @@ void setup() {
 void loop() {
   serviceSerial();
   serviceDrdyPulse();
+  serviceElectricalProfileDynamics();
 
   while (stats.pendingSamples > 0 && frameCount < FRAME_QUEUE_DEPTH) {
     bool tookSampleTick = false;
@@ -767,13 +1070,22 @@ void loop() {
 
   if (frameCount > 0 && !stats.drdyAsserted && !spiTransactionInFlight) {
     prepareSpiBuffer(0);
+    esp_err_t err = spi_slave_queue_trans(SPI_SLAVE_HOST, &spiTransactions[0], 0);
+    if (err != ESP_OK) {
+      stats.overruns++;
+      updateStats();
+      return;
+    }
+
     spiTransactionInFlight = true;
     stats.drdyAsserted = true;
     gpio_set_level((gpio_num_t)DRDY_PIN, drdyActiveLevel());
     if (DRDY_PULSE_MODE) {
       drdyReleaseAtUs = micros() + DRDY_PULSE_US;
     }
-    esp_err_t err = spi_slave_transmit(SPI_SLAVE_HOST, &spiTransactions[0], portMAX_DELAY);
+
+    spi_slave_transaction_t *completedTransaction = nullptr;
+    err = spi_slave_get_trans_result(SPI_SLAVE_HOST, &completedTransaction, portMAX_DELAY);
     if (!DRDY_PULSE_MODE) {
       gpio_set_level((gpio_num_t)DRDY_PIN, drdyInactiveLevel());
       stats.drdyAsserted = false;
