@@ -4,6 +4,15 @@ set -u
 BASE="/home/pi/zboardProject/demo/esp32_ads131m08_spi_slave_emulator"
 LOG_DIR="/tmp"
 URL="http://127.0.0.1:8092/kiosk"
+ADS_SERIAL="/dev/serial/by-path/platform-3f980000.usb-usb-0:1.1.2:1.0-port0"
+FPGA_SERIAL="/dev/serial/by-path/platform-3f980000.usb-usb-0:1.1.3:1.0-port0"
+
+if [ ! -e "$ADS_SERIAL" ]; then
+  ADS_SERIAL="/dev/ttyUSB0"
+fi
+if [ ! -e "$FPGA_SERIAL" ]; then
+  FPGA_SERIAL="/dev/ttyUSB1"
+fi
 
 mkdir -p "$LOG_DIR"
 
@@ -16,7 +25,7 @@ cd "$BASE" || exit 1
 
 if [ -x "$BASE/raspi_motor_plant_sim/nexus_motor_plant_sim" ]; then
   nohup "$BASE/raspi_motor_plant_sim/nexus_motor_plant_sim" \
-    --ads-serial /dev/ttyUSB0 \
+    --ads-serial "$ADS_SERIAL" \
     > "$LOG_DIR/nexus_motor_plant.log" 2>&1 < /dev/null &
 else
   echo "nexus_motor_plant_sim binary not found; build it with: cd $BASE/raspi_motor_plant_sim && make" \
@@ -24,8 +33,8 @@ else
 fi
 
 nohup python3 "$BASE/raspi_fakefpga_web.py" \
-  --serial /dev/ttyUSB1 \
-  --ads-serial /dev/ttyUSB0 \
+  --serial "$FPGA_SERIAL" \
+  --ads-serial "$ADS_SERIAL" \
   --port 8092 \
   > "$LOG_DIR/nexus_fakefpga_web.log" 2>&1 < /dev/null &
 
