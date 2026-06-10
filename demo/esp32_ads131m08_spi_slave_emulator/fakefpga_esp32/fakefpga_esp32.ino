@@ -300,9 +300,17 @@ static bool haveAdsSeq = false;
 static uint32_t lastBadFramesControl = 0;
 static uint32_t lastFramesRead = 0;
 static float fps = 0.0f;
+static uint32_t commandCount = 0;
+static uint32_t stopCommandCount = 0;
+static uint32_t startSequenceCount = 0;
+static uint8_t startRejectReason = 0;
+static uint8_t lastCommandId = 0;
 
 static char serialLine[96];
 static uint8_t serialLineLen = 0;
+
+static void resetProcessSim();
+static void writeFieldPwm(float duty);
 
 static const char *controlStateName(ControlState state) {
   switch (state) {
@@ -360,6 +368,32 @@ static void setControlState(ControlState state) {
   ctrlStateStartMs = millis();
   strncpy(ctrlStatusText, controlStateName(state), sizeof(ctrlStatusText) - 1);
   ctrlStatusText[sizeof(ctrlStatusText) - 1] = '\0';
+}
+
+static void forceStopSequence() {
+  ctrlIn.stopCmd = false;
+  ctrlIn.startCmd = false;
+  ctrlOut = ControlOutputs{};
+  ctrlOut.relayFal = true;
+  motorRun = false;
+  resetProcessSim();
+  faultCode = FAULT_NONE;
+  fault = false;
+  digitalWrite(PIN_MOTOR_RUN, LOW);
+  digitalWrite(PIN_FIELD_ENABLE, LOW);
+  digitalWrite(PIN_FAULT, LOW);
+  writeFieldPwm(0.0f);
+  setControlState(CTRL_IDLE);
+}
+
+static void beginStartSequence() {
+  applyScenarioDefaults();
+  motorRun = true;
+  ctrlIn.startCmd = false;
+  ctrlOut.relay56k = false;
+  startSequenceCount++;
+  startRejectReason = 0;
+  setControlState(CTRL_STARTING);
 }
 
 static void setControlFault(FaultCode code) {
@@ -852,15 +886,8 @@ static void updateSequenceControl() {
   }
 
   if (ctrlIn.stopCmd) {
-    ctrlIn.stopCmd = false;
-    ctrlIn.startCmd = false;
-    ctrlOut = ControlOutputs{};
-    ctrlOut.relayFal = true;
-    motorRun = false;
-    resetProcessSim();
-    faultCode = FAULT_NONE;
-    fault = false;
-    setControlState(CTRL_IDLE);
+    forceStopSequence();
+    return;
   }
 
   switch (ctrlState) {
@@ -882,13 +909,9 @@ static void updateSequenceControl() {
       processSim.speedPct = 0.0f;
       processSim.slipHz = 60.0f;
       if (ctrlIn.startCmd && eprot.allPermissivesOk) {
-        applyScenarioDefaults();
-        motorRun = true;
-        ctrlIn.startCmd = false;
-        ctrlOut.relay56k = false;
-        setControlState(CTRL_STARTING);
-      } else if (ctrlIn.startCmd && !eprot.allPermissivesOk) {
-        ctrlIn.startCmd = false;
+        beginStartSequence();
+      } else if (ctrlIn.startCmd) {
+        startRejectReason = 2;
       }
       break;
 
@@ -1056,6 +1079,11 @@ static void printTelemetry() {
   Serial.print(F(" fault=")); Serial.print(fault ? 1 : 0);
   Serial.print(F(" ctrl=")); Serial.print((uint8_t)ctrlState);
   Serial.print(F(" lastctrl=")); Serial.print((uint8_t)lastCtrlState);
+  Serial.print(F(" cmdn=")); Serial.print(commandCount);
+  Serial.print(F(" cmdid=")); Serial.print(lastCommandId);
+  Serial.print(F(" stopn=")); Serial.print(stopCommandCount);
+  Serial.print(F(" startn=")); Serial.print(startSequenceCount);
+  Serial.print(F(" startrej=")); Serial.print(startRejectReason);
   Serial.print(F(" tripmask=")); Serial.print(eprot.tripMask);
   Serial.print(F(" permask=")); Serial.print(eprot.permissiveMask);
   Serial.print(F(" p_vok=")); Serial.print(eprot.voltageOk ? 1 : 0);
@@ -1136,35 +1164,55 @@ static void printConfig() {
 static void handleCommand(char *line) {
   char *cmd = strtok(line, " \t\r\n");
   if (!cmd) return;
+  commandCount++;
 
   if (!strcasecmp(cmd, "START")) {
+    lastCommandId = 1;
     running = true;
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "STOP")) {
+    lastCommandId = 2;
     running = false;
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "STARTSEQ")) {
+    lastCommandId = 3;
     ctrlIn.startCmd = true;
     ctrlIn.stopCmd = false;
+    evaluateElectricalProtection();
+    readPlantFeedback();
+    if (ctrlState == CTRL_READY && eprot.allPermissivesOk) {
+      beginStartSequence();
+    } else if (ctrlState != CTRL_READY) {
+      startRejectReason = 1;
+    } else {
+      startRejectReason = 2;
+    }
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "STOPSEQ")) {
-    ctrlIn.stopCmd = true;
+    lastCommandId = 4;
+    stopCommandCount++;
+    forceStopSequence();
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "ACK")) {
+    lastCommandId = 5;
     ctrlIn.ack = true;
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "RESET")) {
+    lastCommandId = 6;
     ctrlIn.reset = true;
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "FULLV")) {
+    lastCommandId = 7;
     char *arg = strtok(nullptr, " \t\r\n");
     ctrlIn.fullVoltage = arg && (!strcasecmp(arg, "ON") || !strcmp(arg, "1"));
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "THERMAL")) {
+    lastCommandId = 8;
     char *arg = strtok(nullptr, " \t\r\n");
     ctrlIn.thermalOk = arg && (!strcasecmp(arg, "ON") || !strcmp(arg, "1"));
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "SCENARIO")) {
+    lastCommandId = 9;
     char *arg = strtok(nullptr, " \t\r\n");
     ScenarioMode nextScenario;
     if (arg && parseScenario(arg, nextScenario)) {
@@ -1183,8 +1231,11 @@ static void handleCommand(char *line) {
       Serial.println(F("ERR SCENARIO expects NORMAL, HEAVY_LOAD, NO_DISCHARGE, NO_FIELD, LOW_PF, THERMAL_TRIP, PULLOUT, FULLV_MISSING"));
     }
   } else if (!strcasecmp(cmd, "RUN")) {
+    lastCommandId = 10;
     char *arg = strtok(nullptr, " \t\r\n");
     motorRun = arg && (!strcasecmp(arg, "ON") || !strcmp(arg, "1"));
+    if (!motorRun) stopCommandCount++;
+    if (!motorRun) forceStopSequence();
     Serial.println(F("OK"));
   } else if (!strcasecmp(cmd, "AUTO")) {
     char *arg = strtok(nullptr, " \t\r\n");

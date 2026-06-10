@@ -256,6 +256,7 @@ struct Plant {
   bool breakerClosed = false;
   bool fieldApplied = false;
   bool fault = false;
+  bool forceStop = false;
   PlantScenario scenario = PlantScenario::Normal;
   ExciterBoard exciter;
   ExciterBoardOutput exciterOut;
@@ -657,11 +658,15 @@ ControlIn readControl(Gpio &gpio, const Args &args) {
 
 void updatePlant(Plant &p, const ControlIn &in, float dt) {
   p.fault = in.faultOut;
+  if (!in.motorRunCmd && p.speedPct <= 0.1f) {
+    p.forceStop = false;
+  }
+  const bool runCommand = in.motorRunCmd && !p.forceStop;
   if (p.fault) {
     p.state = PlantState::Faulted;
-  } else if (!in.motorRunCmd && p.speedPct <= 0.1f) {
+  } else if (!runCommand && p.speedPct <= 0.1f) {
     p.state = PlantState::Stopped;
-  } else if (!in.motorRunCmd) {
+  } else if (!runCommand) {
     p.state = PlantState::Coasting;
   } else if (p.speedPct < 8.0f) {
     p.state = PlantState::Energized;
@@ -681,9 +686,9 @@ void updatePlant(Plant &p, const ControlIn &in, float dt) {
     p.loadPct = approach(p.loadPct, 105.0f, 10.0f, dt);
   }
 
-  const bool accelerating = in.motorRunCmd && !p.fault;
+  const bool accelerating = runCommand && !p.fault;
   const float speedPu = clampf(p.speedPct / 100.0f, 0.0f, 1.0f);
-  const bool fieldCommandedNow = in.fieldEnable && in.motorRunCmd && !p.fault && p.speedPct > 75.0f;
+  const bool fieldCommandedNow = in.fieldEnable && runCommand && !p.fault && p.speedPct > 75.0f;
   const float inductionTorque = accelerating ? clampf(2.1f - 1.25f * speedPu + 0.18f * std::sin(kPi * speedPu), 0.18f, 2.15f) : 0.0f;
   const float syncTorque = fieldCommandedNow ? clampf(p.fieldCurrentA / 4.2f, 0.0f, 1.4f) * clampf((p.speedPct - 88.0f) / 12.0f, 0.0f, 1.0f) : 0.0f;
   p.loadTorquePu = 0.18f + 0.62f * clampf(p.loadPct / 100.0f, 0.0f, 1.2f) + 0.08f * speedPu * speedPu;
@@ -703,7 +708,7 @@ void updatePlant(Plant &p, const ControlIn &in, float dt) {
   }
   p.speedPct = clampf(p.speedPct, 0.0f, 100.0f);
   p.slipHz = std::max(0.0f, 60.0f * (1.0f - p.speedPct / 100.0f));
-  p.breakerClosed = in.motorRunCmd && !p.fault;
+  p.breakerClosed = runCommand && !p.fault;
   p.fieldApplied = in.fieldEnable && p.breakerClosed && p.speedPct > 75.0f && !p.fault;
   p.statorCurrentScale = p.breakerClosed ? clampf(1.9f - 0.9f * speedPu + 0.25f * p.loadTorquePu, 0.65f, 2.4f) : 0.0f;
   p.dischargeCurrentA = p.breakerClosed && p.speedPct < 92.0f ? 0.9f + (100.0f - p.speedPct) * 0.038f : 0.0f;
@@ -863,11 +868,18 @@ void applyPlantCommand(Plant &plant, const std::string &line) {
     PlantScenario scenario;
     if (parseScenario(cmd.substr(9), scenario)) {
       plant.scenario = scenario;
+      plant.forceStop = false;
       if (scenario != PlantScenario::Pullout) plant.loadPct = 45.0f;
       std::cout << "PLANT_CMD scenario=" << scenarioName(plant.scenario) << "\n";
     }
+  } else if (cmd == "STOP") {
+    plant.forceStop = true;
+    plant.breakerClosed = false;
+    plant.fieldApplied = false;
+    std::cout << "PLANT_CMD stop\n";
   } else if (cmd == "RESET" || cmd == "SCENARIO NORMAL") {
     plant.scenario = PlantScenario::Normal;
+    plant.forceStop = false;
     plant.fault = false;
     plant.loadPct = 45.0f;
     std::cout << "PLANT_CMD reset\n";

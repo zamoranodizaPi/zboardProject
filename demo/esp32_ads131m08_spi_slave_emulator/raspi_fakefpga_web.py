@@ -18,6 +18,7 @@ import mimetypes
 import math
 import os
 import pathlib
+import queue
 import re
 import threading
 import time
@@ -959,6 +960,7 @@ class SerialWorker:
         self.state = state
         self.ser: Optional[serial.Serial] = None
         self.lock = threading.Lock()
+        self.commands: "queue.Queue[tuple[str, threading.Event, Dict[str, str]]]" = queue.Queue(maxsize=128)
         self.stop = threading.Event()
 
     def auto_port(self) -> str:
@@ -972,7 +974,7 @@ class SerialWorker:
         ser = serial.Serial()
         ser.port = port
         ser.baudrate = self.baud
-        ser.timeout = 0.5
+        ser.timeout = 0.1
         ser.dtr = False
         ser.rts = False
         ser.open()
@@ -992,17 +994,42 @@ class SerialWorker:
                 self.ser.close()
             self.ser = None
 
-    def send(self, command: str) -> str:
+    def send(self, command: str, wait_s: float = 1.0) -> str:
         command = command.strip()
         if not command:
             return "empty"
-        with self.lock:
-            if not self.ser or not self.ser.is_open:
-                return "serial unavailable"
-            self.ser.write((command + "\n").encode("ascii", errors="ignore"))
-            self.ser.flush()
-        time.sleep(0.08)
-        return "OK"
+        done = threading.Event()
+        result: Dict[str, str] = {"text": "queued"}
+        try:
+            self.commands.put_nowait((command, done, result))
+        except queue.Full:
+            return "serial command queue full"
+        if wait_s <= 0.0 or not done.wait(wait_s):
+            return "queued"
+        return result["text"]
+
+    def drain_commands(self) -> None:
+        if not self.ser or not self.ser.is_open:
+            return
+        for _ in range(32):
+            try:
+                command, done, result = self.commands.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                self.ser.write((command + "\n").encode("ascii", errors="ignore"))
+                self.ser.flush()
+                result["text"] = "OK"
+                with self.state.lock:
+                    self.state.response = f"sent {command}"
+            except Exception as exc:
+                result["text"] = f"serial write error: {exc}"
+                with self.state.lock:
+                    self.state.response = result["text"]
+                raise
+            finally:
+                done.set()
+                self.commands.task_done()
 
     def parse_line(self, line: str) -> None:
         if not line.startswith("FPGA ") or "FPLL" in line:
@@ -1032,8 +1059,10 @@ class SerialWorker:
                 if not self.ser or not self.ser.is_open:
                     self.connect()
                 assert self.ser is not None
+                self.drain_commands()
                 line = self.ser.readline().decode("ascii", errors="replace").strip()
-                self.parse_line(line)
+                if line:
+                    self.parse_line(line)
             except Exception as exc:  # keep the HMI alive across USB resets
                 with self.state.lock:
                     self.state.response = f"serial error: {exc}"
@@ -1342,11 +1371,7 @@ def make_handler(state: SharedState, worker: SerialWorker, ads_port: SerialComma
                 telemetry_snapshot = dict(state.telemetry)
             plant_snapshot = read_plant_state()
             highrate_id = ""
-            if upper == "STARTSEQ":
-                highrate_id = state.highrate.trigger("START_SEQUENCE", telemetry_snapshot, plant_snapshot)
-            elif upper == "STOPSEQ":
-                highrate_id = state.highrate.trigger("STOP_SEQUENCE", telemetry_snapshot, plant_snapshot)
-            elif upper in ("HAPPY_PATH", "HAPPYPATH"):
+            if upper in ("HAPPY_PATH", "HAPPYPATH"):
                 highrate_id = state.highrate.trigger("HAPPY_PATH", telemetry_snapshot, plant_snapshot)
                 send_plant_command("SCENARIO NORMAL")
                 worker.send("RESET")
@@ -1373,6 +1398,18 @@ def make_handler(state: SharedState, worker: SerialWorker, ads_port: SerialComma
                 response = send_plant_command(plant_command)
             else:
                 response = worker.send(command)
+                if upper == "STOPSEQ":
+                    plant_stop_response = send_plant_command("STOP")
+                    run_off_response = worker.send("RUN OFF")
+                    response = (
+                        f"STOPSEQ {response}; "
+                        f"PLANT STOP {plant_stop_response}; "
+                        f"RUN OFF {run_off_response}"
+                    )
+                if upper == "STARTSEQ":
+                    highrate_id = state.highrate.trigger("START_SEQUENCE", telemetry_snapshot, plant_snapshot)
+                elif upper == "STOPSEQ":
+                    highrate_id = state.highrate.trigger("STOP_SEQUENCE", telemetry_snapshot, plant_snapshot)
             with state.lock:
                 state.response = f"{command} -> {response}"
             self.send_body(HTTPStatus.OK, "application/json", json.dumps({"response": response, "highrate": highrate_id}).encode("utf-8"))
