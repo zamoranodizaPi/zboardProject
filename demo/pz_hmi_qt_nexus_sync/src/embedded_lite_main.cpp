@@ -227,6 +227,7 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("Nexus Sync HMI Lite");
     QApplication::setOrganizationName("Nexus");
+    QApplication::setOverrideCursor(Qt::BlankCursor);
     qInfo() << "Nexus HMI lite: application started";
     qInfo() << "Nexus HMI lite: platform" << qgetenv("QT_QPA_PLATFORM") << "fb_drm" << qgetenv("QT_QPA_FB_DRM");
 

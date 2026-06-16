@@ -5,12 +5,14 @@ Wants=multi-user.target
 
 [Service]
 Type=simple
+PermissionsStartOnly=true
 User=xilinx
 SupplementaryGroups=video
 Environment=QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0
 Environment=QT_QPA_FB_DRM=0
 Environment=QT_QUICK_BACKEND=software
 WorkingDirectory=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build
+ExecStartPre=/bin/sh -c 'setterm -cursor off -blank 0 -powersave off >/dev/tty0 || true'
 ExecStart=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build/nexus-sync-hmi-lite --demo --fullscreen
 Restart=always
 RestartSec=2
