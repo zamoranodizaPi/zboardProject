@@ -1,0 +1,21 @@
+[Unit]
+Description=Nexus Sync local HDMI HMI
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=xilinx
+SupplementaryGroups=video
+Environment=QT_QPA_PLATFORM=linuxfb
+Environment=QT_QPA_FB_DRM=1
+Environment=QT_QUICK_BACKEND=software
+WorkingDirectory=/opt/nexus/pz_hmi_qt_nexus_sync/build
+ExecStart=/opt/nexus/pz_hmi_qt_nexus_sync/build/nexus-sync-hmi --demo --fullscreen
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

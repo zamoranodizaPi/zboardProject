@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/">
+        <file>Main.qml</file>
+        <file>components/MetricTile.qml</file>
+        <file>components/Panel.qml</file>
+        <file>components/StatePill.qml</file>
+        <file>components/ConfirmDialog.qml</file>
+    </qresource>
+</RCC>
