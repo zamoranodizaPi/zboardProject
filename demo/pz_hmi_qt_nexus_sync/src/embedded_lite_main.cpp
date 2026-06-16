@@ -1,4 +1,5 @@
 #include "backend_facade.h"
+#include "axi_lite_provider.h"
 #include "demo_data_provider.h"
 #include "telemetry_model.h"
 
@@ -14,6 +15,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <memory>
 
 namespace {
 
@@ -234,12 +237,25 @@ int main(int argc, char *argv[]) {
     QCommandLineParser parser;
     parser.addHelpOption();
     parser.addOption({ "demo", "Run with local simulated data." });
+    parser.addOption({ "axi", "Read telemetry from PL AXI-Lite registers at <base>.", "base" });
     parser.addOption({ "fullscreen", "Start fullscreen." });
     parser.process(app);
 
     TelemetryModel model;
+    std::unique_ptr<DataProvider> provider;
     DemoDataProvider demoProvider;
-    BackendFacade backend(&model, &demoProvider);
+    if (parser.isSet("axi") && !parser.isSet("demo")) {
+        bool ok = false;
+        const quintptr base = parser.value("axi").toULongLong(&ok, 0);
+        if (ok && base != 0) {
+            qInfo() << "Nexus HMI lite: using AXI provider at" << Qt::hex << base;
+            provider.reset(new AxiLiteProvider(base));
+        } else {
+            qWarning() << "Nexus HMI lite: invalid --axi base, falling back to demo";
+        }
+    }
+    DataProvider *activeProvider = provider ? provider.get() : static_cast<DataProvider *>(&demoProvider);
+    BackendFacade backend(&model, activeProvider);
 
     app.setStyleSheet(R"(
         QWidget#root { background: #08111D; color: #F5F8FC; font-family: DejaVu Sans; }
@@ -285,7 +301,7 @@ int main(int argc, char *argv[]) {
         window.show();
     }
 
-    demoProvider.start();
+    activeProvider->start();
     qInfo() << "Nexus HMI lite: provider started";
     return app.exec();
 }

@@ -12,7 +12,7 @@ Environment=QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0
 Environment=QT_QPA_FB_DRM=0
 Environment=QT_QUICK_BACKEND=software
 WorkingDirectory=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build
-ExecStartPre=/bin/sh -c 'setterm -cursor off -blank 0 -powersave off >/dev/tty0 || true'
+ExecStartPre=/bin/sh -c 'printf "\033[?25l\033[2J" >/dev/tty1 || true; setterm -cursor off -blank 0 -powersave off < /dev/tty1 > /dev/tty1 || true'
 ExecStart=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build/nexus-sync-hmi-lite --demo --fullscreen
 Restart=always
 RestartSec=2
