@@ -63,7 +63,7 @@ demo/pz_hmi_qt_nexus_sync
 to:
 
 ```text
-/opt/nexus/pz_hmi_qt_nexus_sync
+/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync
 ```
 
 ## Install Qt Runtime
@@ -81,34 +81,53 @@ If apt is unavailable or too heavy, use cross-build with an ARM Qt5 sysroot.
 ## Build
 
 ```bash
-cd /opt/nexus/pz_hmi_qt_nexus_sync
+cd /opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync
 mkdir -p build
 cd build
-cmake ..
-make -j2
+QT_SELECT=qt5 cmake ..
+make -j2 nexus-sync-hmi-lite
 ```
 
-## Run Demo
+## Run Embedded Lite Demo
 
 Framebuffer:
 
 ```bash
-QT_QPA_PLATFORM=linuxfb ./nexus-sync-hmi --demo --fullscreen
+QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0 QT_QPA_FB_DRM=0 ./nexus-sync-hmi-lite --demo --fullscreen
 ```
 
-EGLFS if available:
+## Run With PL/FakeADS Measurements
+
+The HMI does not read FakeADS through Linux `spidev`. FakeADS is wired to PL
+pins, then the PL exposes normalized registers through AXI-Lite.
+
+Once the HDMI Vivado project includes the `nexus_sync_control` AXI IP, use the
+base address assigned by Vivado:
 
 ```bash
-QT_QPA_PLATFORM=eglfs ./nexus-sync-hmi --demo --fullscreen
+QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0 QT_QPA_FB_DRM=0 ./nexus-sync-hmi-lite --axi 0x43C20000 --fullscreen
 ```
 
 ## Install Service
 
 ```bash
-sudo cp /opt/nexus/pz_hmi_qt_nexus_sync/systemd/nexus-sync-hmi.service /etc/systemd/system/
+sudo cp /opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/systemd/nexus-sync-hmi.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable nexus-sync-hmi.service
 sudo systemctl start nexus-sync-hmi.service
+```
+
+Default service mode is demo:
+
+```text
+NEXUS_HMI_ARGS=--demo --fullscreen
+```
+
+To switch to PL/FakeADS telemetry after the AXI IP is integrated:
+
+```bash
+echo 'NEXUS_HMI_ARGS=--axi 0x43C20000 --fullscreen' | sudo tee /etc/default/nexus-sync-hmi
+sudo systemctl restart nexus-sync-hmi.service
 ```
 
 For debug:

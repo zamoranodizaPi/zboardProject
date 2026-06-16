@@ -11,9 +11,11 @@ SupplementaryGroups=video
 Environment=QT_QPA_PLATFORM=linuxfb:fb=/dev/fb0
 Environment=QT_QPA_FB_DRM=0
 Environment=QT_QUICK_BACKEND=software
+Environment=NEXUS_HMI_ARGS=--demo --fullscreen
+EnvironmentFile=-/etc/default/nexus-sync-hmi
 WorkingDirectory=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build
 ExecStartPre=/bin/sh -c 'printf "\033[?25l\033[2J" >/dev/tty1 || true; setterm -cursor off -blank 0 -powersave off < /dev/tty1 > /dev/tty1 || true'
-ExecStart=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build/nexus-sync-hmi-lite --demo --fullscreen
+ExecStart=/opt/nexus/zboardProject/demo/pz_hmi_qt_nexus_sync/build/nexus-sync-hmi-lite $NEXUS_HMI_ARGS
 Restart=always
 RestartSec=2
 StandardOutput=journal
