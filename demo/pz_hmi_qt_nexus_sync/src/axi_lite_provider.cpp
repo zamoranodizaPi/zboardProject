@@ -42,11 +42,12 @@ void AxiLiteProvider::start() {
     }
     const quint32 id = readReg(REG_ID);
     if (id != NEXUS_ID) {
-        qWarning() << "AXI provider: unexpected ID" << Qt::hex << id << "at" << m_baseAddress;
+        qWarning() << "AXI provider: unexpected ID 0x" + QString::number(id, 16)
+                   << "at 0x" + QString::number(m_baseAddress, 16);
         emit providerStatusChanged(false, "AXI ID mismatch");
         return;
     }
-    qInfo() << "AXI provider: mapped Nexus Sync registers at" << Qt::hex << m_baseAddress;
+    qInfo() << "AXI provider: mapped Nexus Sync registers at 0x" + QString::number(m_baseAddress, 16);
     m_pollTimer.start();
     emit providerStatusChanged(true, "AXI provider connected");
 }
@@ -152,7 +153,7 @@ bool AxiLiteProvider::openMap() {
 
     void *mapped = ::mmap(nullptr, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, static_cast<off_t>(m_baseAddress));
     if (mapped == MAP_FAILED) {
-        qWarning() << "AXI provider: mmap failed at" << Qt::hex << m_baseAddress;
+        qWarning() << "AXI provider: mmap failed at 0x" + QString::number(m_baseAddress, 16);
         ::close(m_fd);
         m_fd = -1;
         return false;

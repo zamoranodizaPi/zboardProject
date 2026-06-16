@@ -248,7 +248,7 @@ int main(int argc, char *argv[]) {
         bool ok = false;
         const quintptr base = parser.value("axi").toULongLong(&ok, 0);
         if (ok && base != 0) {
-            qInfo() << "Nexus HMI lite: using AXI provider at" << Qt::hex << base;
+            qInfo() << "Nexus HMI lite: using AXI provider at 0x" + QString::number(base, 16);
             provider.reset(new AxiLiteProvider(base));
         } else {
             qWarning() << "Nexus HMI lite: invalid --axi base, falling back to demo";
